@@ -15,6 +15,8 @@ const MAX_RETRIES = Number(process.env.MAX_RETRIES || 5);
 const RETRY_DELAY_MS = Number(process.env.RETRY_DELAY_MS || 2000);
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 10);
 const STAGGER_INTERVAL_MS = Number(process.env.STAGGER_INTERVAL_MS || 1200);
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 120000);
+const IMAGE_DOWNLOAD_TIMEOUT_MS = Number(process.env.IMAGE_DOWNLOAD_TIMEOUT_MS || 120000);
 
 // 确保图片本地持久化目录就绪
 try {
@@ -167,7 +169,7 @@ async function backupImage(filename, originalUrl) {
   } catch {}
 
   try {
-    const res = await fetch(originalUrl, { signal: AbortSignal.timeout(60000) });
+    const res = await fetch(originalUrl, { signal: AbortSignal.timeout(IMAGE_DOWNLOAD_TIMEOUT_MS) });
     if (!res.ok) return;
     const arrayBuffer = await res.arrayBuffer();
     await fs.writeFile(dest, Buffer.from(arrayBuffer));
@@ -202,7 +204,7 @@ async function serveImage(req, res, filename) {
   }
 
   try {
-    const upRes = await fetch(upstreamUrl, { signal: AbortSignal.timeout(60000) });
+    const upRes = await fetch(upstreamUrl, { signal: AbortSignal.timeout(IMAGE_DOWNLOAD_TIMEOUT_MS) });
     if (!upRes.ok) {
       return sendJson(res, upRes.status, { error: "Image not found on upstream" });
     }
@@ -270,7 +272,7 @@ async function handleGenerate(req, res) {
               ],
               stream: false,
             }),
-            signal: AbortSignal.timeout(90000),
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
           });
 
           if (!upRes.ok) {
@@ -364,7 +366,7 @@ async function handleEdits(req, res) {
               ],
               stream: false,
             }),
-            signal: AbortSignal.timeout(90000),
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
           });
 
           if (!upRes.ok) {
