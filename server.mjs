@@ -14,7 +14,7 @@ const UPSTREAM_KEY = process.env.UPSTREAM_KEY || "";
 const MAX_RETRIES = Number(process.env.MAX_RETRIES || 3);
 const RETRY_DELAY_MS = Number(process.env.RETRY_DELAY_MS || 1500);
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 10);
-const STAGGER_INTERVAL_MS = Number(process.env.STAGGER_INTERVAL_MS || 1200);
+const STAGGER_INTERVAL_MS = Number(process.env.STAGGER_INTERVAL_MS || 1000);
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 45000);
 const IMAGE_TIMEOUT_MS = Number(process.env.IMAGE_DOWNLOAD_TIMEOUT_MS || 45000);
 
@@ -33,11 +33,11 @@ const CORS_HEADERS = {
   "Access-Control-Max-Age": "86400",
 };
 
-// 确保图片本地持久化目录存在
+// 确保图片本地持久化目录就绪
 fs.mkdir(BACKUP_DIR, { recursive: true }).catch(() => {});
 
 // ==========================================
-// 2. 通用工具与调度器
+// 2. 基础工具与并发队列
 // ==========================================
 
 // JSON 快捷响应
@@ -93,33 +93,23 @@ class BoundedMap {
 }
 const imageUpstreamMap = new BoundedMap(2000);
 
-// 并发控制与错峰平滑队列（防止多任务瞬间打满同一账号）
+// 标准无死锁并发队列 (参考 gemini-studio)
 class ConcurrencyQueue {
-  constructor(max = 10, minIntervalMs = 1200) {
+  constructor(max = 10) {
     this.max = max;
     this.active = 0;
     this.waiting = [];
-    this.minIntervalMs = minIntervalMs;
-    this.lastDispatchedAt = 0;
   }
-  async acquire(abortSignal) {
-    return new Promise((resolve, reject) => {
-      if (abortSignal?.aborted) return reject(new Error("Aborted"));
-      const execute = async () => {
-        if (abortSignal?.aborted) {
-          this.release();
-          return reject(new Error("Aborted"));
-        }
+  async acquire() {
+    if (this.active < this.max) {
+      this.active++;
+      return () => this.release();
+    }
+    return new Promise((resolve) => {
+      this.waiting.push(() => {
         this.active++;
-        const elapsed = Date.now() - this.lastDispatchedAt;
-        if (elapsed < this.minIntervalMs) {
-          await new Promise((r) => setTimeout(r, this.minIntervalMs - elapsed));
-        }
-        this.lastDispatchedAt = Date.now();
         resolve(() => this.release());
-      };
-      if (this.active < this.max) execute();
-      else this.waiting.push(execute);
+      });
     });
   }
   release() {
@@ -130,17 +120,15 @@ class ConcurrencyQueue {
     }
   }
 }
-const queue = new ConcurrencyQueue(MAX_CONCURRENT, STAGGER_INTERVAL_MS);
+const queue = new ConcurrencyQueue(MAX_CONCURRENT);
 
-// 指数退避与抖动重试封装
-async function withRetry(fn, taskName, maxRetries, abortSignal) {
+// 指数退避与抖动重试控制
+async function withRetry(fn, taskName, maxRetries = MAX_RETRIES) {
   let lastErr;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    if (abortSignal?.aborted) throw new Error("Client aborted");
     try {
       return await fn(attempt);
     } catch (err) {
-      if (abortSignal?.aborted) throw err;
       lastErr = err;
       console.warn(`[重试] ${taskName} 第 ${attempt}/${maxRetries} 次失败: ${err.message}`);
       if (attempt < maxRetries) {
@@ -235,19 +223,16 @@ async function serveImage(req, res, filename) {
 // 4. 业务处理：文生图、图生图、文本/推理
 // ==========================================
 
-// 单次生图调用（注入系统约束，防止 Gemini 闲聊，支持客户端断开）
-async function requestUpstreamImage(messages, model, clientAbort, taskName) {
-  const release = await queue.acquire(clientAbort.signal);
+// 单次生图调用（注入系统提示词，防止 Gemini 闲聊）
+async function requestUpstreamImage(messages, model, taskName) {
+  const release = await queue.acquire();
   try {
     return await withRetry(async () => {
-      const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-      const signal = AbortSignal.any ? AbortSignal.any([clientAbort.signal, timeoutSignal]) : timeoutSignal;
-
       const upRes = await fetch(`${UPSTREAM_URL}/v1/chat/completions`, {
         method: "POST",
         headers: { Authorization: `Bearer ${UPSTREAM_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify({ model, messages, stream: false }),
-        signal,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
 
       if (!upRes.ok) throw new Error(`上游 HTTP ${upRes.status}: ${(await upRes.text()).slice(0, 150)}`);
@@ -263,7 +248,7 @@ async function requestUpstreamImage(messages, model, clientAbort, taskName) {
         throw new Error(`上游未返回有效图片 (finish_reason: ${finishReason})`);
       }
       return rewriteImageUrl(imgUrl);
-    }, taskName, MAX_RETRIES, clientAbort.signal);
+    }, taskName, MAX_RETRIES);
   } finally {
     release();
   }
@@ -271,9 +256,6 @@ async function requestUpstreamImage(messages, model, clientAbort, taskName) {
 
 // POST /v1/images/generations 文生图
 async function handleGenerate(req, res) {
-  const clientAbort = new AbortController();
-  req.on("close", () => { if (!res.writableEnded) clientAbort.abort(); });
-
   let body = {};
   try {
     let raw = "";
@@ -294,12 +276,14 @@ async function handleGenerate(req, res) {
   console.log(`[BFF] 文生图请求: model=${model}, count=${count}, prompt="${prompt.slice(0, 45)}..."`);
 
   try {
-    const urls = await Promise.all(
-      Array.from({ length: count }, (_, i) => requestUpstreamImage(messages, model, clientAbort, `生图任务 #${i + 1}`))
-    );
+    const tasks = [];
+    for (let i = 0; i < count; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, STAGGER_INTERVAL_MS));
+      tasks.push(requestUpstreamImage(messages, model, `生图任务 #${i + 1}`));
+    }
+    const urls = await Promise.all(tasks);
     sendJson(res, 200, { created: Math.floor(Date.now() / 1000), data: urls.map((url) => ({ url })) });
   } catch (err) {
-    if (clientAbort.signal.aborted) return;
     console.error("[BFF] 生图最终失败:", err.message);
     sendJson(res, 500, { error: { message: err.message || "生图失败" } });
   }
@@ -307,9 +291,6 @@ async function handleGenerate(req, res) {
 
 // POST /v1/images/edits 图生图 / 编辑
 async function handleEdits(req, res) {
-  const clientAbort = new AbortController();
-  req.on("close", () => { if (!res.writableEnded) clientAbort.abort(); });
-
   try {
     const webReq = new Request("http://localhost" + req.url, {
       method: req.method,
@@ -337,12 +318,14 @@ async function handleEdits(req, res) {
 
     console.log(`[BFF] 图生图请求: model=${model}, refImages=${imageParts.length}, prompt="${prompt.slice(0, 45)}..."`);
 
-    const urls = await Promise.all(
-      Array.from({ length: count }, (_, i) => requestUpstreamImage(messages, model, clientAbort, `图生图任务 #${i + 1}`))
-    );
+    const tasks = [];
+    for (let i = 0; i < count; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, STAGGER_INTERVAL_MS));
+      tasks.push(requestUpstreamImage(messages, model, `图生图任务 #${i + 1}`));
+    }
+    const urls = await Promise.all(tasks);
     sendJson(res, 200, { created: Math.floor(Date.now() / 1000), data: urls.map((url) => ({ url })) });
   } catch (err) {
-    if (clientAbort.signal.aborted) return;
     console.error("[BFF] 图生图最终失败:", err.message);
     sendJson(res, 500, { error: { message: err.message || "图生图失败" } });
   }
@@ -350,9 +333,6 @@ async function handleEdits(req, res) {
 
 // POST /v1/responses 前端画布流式文本与推理适配
 async function handleResponses(req, res) {
-  const clientAbort = new AbortController();
-  req.on("close", () => { if (!res.writableEnded) clientAbort.abort(); });
-
   let body = {};
   try {
     let raw = "";
@@ -370,14 +350,11 @@ async function handleResponses(req, res) {
 
   const isStream = Boolean(body.stream);
   try {
-    const timeoutSignal = AbortSignal.timeout(120000);
-    const signal = AbortSignal.any ? AbortSignal.any([clientAbort.signal, timeoutSignal]) : timeoutSignal;
-
     const upRes = await fetch(`${UPSTREAM_URL}/v1/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${UPSTREAM_KEY}`, "Content-Type": "application/json", ...(isStream ? { Accept: "text/event-stream" } : {}) },
       body: JSON.stringify({ model, messages, stream: isStream }),
-      signal,
+      signal: AbortSignal.timeout(120000),
     });
 
     if (!upRes.ok) return sendJson(res, upRes.status, { error: { message: await upRes.text() } });
@@ -399,7 +376,6 @@ async function handleResponses(req, res) {
 
     try {
       while (true) {
-        if (clientAbort.signal.aborted) break;
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
@@ -418,15 +394,13 @@ async function handleResponses(req, res) {
           } catch {}
         }
       }
-      if (!clientAbort.signal.aborted) {
-        res.write(`data: ${JSON.stringify({ type: "response.completed", response: { output_text: fullText } })}\n\n`);
-        res.write("data: [DONE]\n\n");
-      }
+      res.write(`data: ${JSON.stringify({ type: "response.completed", response: { output_text: fullText } })}\n\n`);
+      res.write("data: [DONE]\n\n");
     } finally {
       if (!res.writableEnded) res.end();
     }
   } catch (err) {
-    if (!clientAbort.signal.aborted && !res.headersSent) sendJson(res, 500, { error: { message: err.message } });
+    if (!res.headersSent) sendJson(res, 500, { error: { message: err.message } });
   }
 }
 
