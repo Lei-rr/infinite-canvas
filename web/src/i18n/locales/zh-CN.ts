@@ -1,7 +1,7 @@
 export default {
     meta: {
-        title: "无限画布",
-        description: "一个无限画布创作工具",
+        title: "炸天帮画布",
+        description: "炸天帮画布创作工具",
     },
     theme: { toggle: "切换主题" },
     common: {

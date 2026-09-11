@@ -37,7 +37,8 @@ export function AppProviders({ children }: { children: ReactNode }) {
 
     useEffect(() => {
         document.documentElement.lang = locale;
-        document.title = t("meta.title");
+        const appTitle = (window as unknown as { __RUNTIME_CONFIG__?: { APP_TITLE?: string } })?.__RUNTIME_CONFIG__?.APP_TITLE || "炸天帮画布";
+        document.title = appTitle;
         document.querySelector('meta[name="description"]')?.setAttribute("content", t("meta.description"));
         dayjs.locale(locale === "zh-CN" ? "zh-cn" : "en");
     }, [locale, t]);

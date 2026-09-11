@@ -1,11 +1,17 @@
 services:
   app:
-    image: ghcr.io/basketikun/infinite-canvas:latest
+    image: ghcr.io/lei-rr/infinite-canvas:latest
     container_name: infinite-canvas
     ports:
-      - "3000:3000"
-    restart: unless-stopped
-    # 统计分析（可选，默认关闭）。每家一个独立变量，填了谁就启用谁，可同时启用多家：
-    # environment:
-    #   ANALYTICS_GA4_ID: G-XXXXXXXXXX                    # Google Analytics 4 衡量 ID
-    #   ANALYTICS_BAIDU_ID: xxxxxxxxxxxxxxxxxxxxxxxxxxxx   # 百度统计站点 ID
+      - "3011:3000"
+    restart: always
+    volumes:
+      - ./data/images:/app/data/images
+    environment:
+      APP_TITLE: "炸天帮画布"
+      UPSTREAM_URL: "http://your-new-api-host:3000"
+      UPSTREAM_KEY: "sk-your-api-key"
+      MAX_RETRIES: "5"
+      RETRY_DELAY_MS: "2000"
+      MAX_CONCURRENT: "3"
+      STAGGER_INTERVAL_MS: "1200"

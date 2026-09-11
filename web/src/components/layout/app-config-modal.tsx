@@ -338,28 +338,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
 }
 
 export function AppConfigModal() {
-    const { t } = useTranslation();
-    const isConfigOpen = useConfigStore((state) => state.isConfigOpen);
-    const configTab = useConfigStore((state) => state.configTab);
-    const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
-    return (
-        <Modal
-            title={
-                <div>
-                    <div className="text-lg font-semibold">{t("config.title")}</div>
-                    <div className="mt-1 text-xs font-normal text-stone-500">{t("config.modalDescription")}</div>
-                </div>
-            }
-            open={isConfigOpen}
-            width={980}
-            centered
-            onCancel={() => setConfigDialogOpen(false)}
-            styles={{ body: { maxHeight: "72vh", overflowY: "auto", paddingRight: 12 } }}
-            footer={null}
-        >
-            <AppConfigPanel showDoneButton initialTab={configTab} />
-        </Modal>
-    );
+    return null;
 }
 
 function withChannels(config: AiConfig, channels: ModelChannel[]): AiConfig {

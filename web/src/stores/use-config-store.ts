@@ -77,31 +77,33 @@ const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 export const LOCAL_PROXY_PACKAGE = "@basketikun/canvas-proxy";
 export const DEFAULT_LOCAL_PROXY_URL = "http://127.0.0.1:23210";
 
+export const DEFAULT_CHANNEL_MODELS: ChannelModel[] = [
+    { name: "gemini-3.1-flash-image", capability: "image" },
+    { name: "gemini-3.1-flash-image-2K", capability: "image" },
+    { name: "gemini-3.1-flash-image-4K", capability: "image" },
+    { name: "gemini-3.8-flash", capability: "text" },
+];
+
 export const defaultConfig: AiConfig = {
     channelMode: "local",
-    baseUrl: OPENAI_BASE_URL,
-    apiKey: "",
+    baseUrl: "/api-proxy",
+    apiKey: "system-key",
     apiFormat: "openai",
     channels: [
         {
             id: "default",
-            name: i18n.t("config.channels.defaultName"),
-            baseUrl: OPENAI_BASE_URL,
-            apiKey: "",
+            name: "系统内置渠道",
+            baseUrl: "/api-proxy",
+            apiKey: "system-key",
             apiFormat: "openai",
-            models: [
-                { name: "gpt-image-2", capability: "image" },
-                { name: "grok-imagine-video", capability: "video" },
-                { name: "gpt-5.5", capability: "text" },
-                { name: "gpt-4o-mini-tts", capability: "audio" },
-            ],
+            models: DEFAULT_CHANNEL_MODELS,
         },
     ],
-    model: "default::gpt-image-2",
-    imageModel: "default::gpt-image-2",
-    videoModel: "default::grok-imagine-video",
-    textModel: "default::gpt-5.5",
-    audioModel: "default::gpt-4o-mini-tts",
+    model: "default::gemini-3.1-flash-image",
+    imageModel: "default::gemini-3.1-flash-image",
+    videoModel: "",
+    textModel: "default::gemini-3.8-flash",
+    audioModel: "",
     audioVoice: "alloy",
     audioFormat: "mp3",
     audioSpeed: "1",
@@ -113,12 +115,12 @@ export const defaultConfig: AiConfig = {
     videoMode: "frames",
     systemPrompt: "",
     reasoningEffort: "auto",
-    models: ["default::gpt-image-2", "default::grok-imagine-video", "default::gpt-5.5", "default::gpt-4o-mini-tts"],
+    models: ["default::gemini-3.1-flash-image", "default::gemini-3.1-flash-image-2K", "default::gemini-3.1-flash-image-4K", "default::gemini-3.8-flash"],
     quality: "auto",
     size: "1:1",
     background: "",
     count: "1",
-    canvasImageCount: "3",
+    canvasImageCount: "1",
     proxyEnabled: false,
     proxyUrl: DEFAULT_LOCAL_PROXY_URL,
 };
@@ -181,11 +183,20 @@ export function modelMatchesCapability(config: AiConfig, value: string, capabili
 }
 
 export function resolveModelForCapability(config: AiConfig, currentModel: string | undefined, capability: ModelCapability) {
-    const defaultModel = capability === "image" ? config.imageModel : capability === "video" ? config.videoModel : capability === "audio" ? config.audioModel : config.textModel;
-    const fallbackModel = capability === "image" ? defaultConfig.imageModel : capability === "video" ? defaultConfig.videoModel : capability === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
-    if (currentModel && modelMatchesCapability(config, currentModel, capability)) return currentModel;
-    if (defaultModel && modelMatchesCapability(config, defaultModel, capability)) return defaultModel;
-    return fallbackModel;
+    const defaultImage = "default::gemini-3.1-flash-image";
+    const defaultText = "default::gemini-3.8-flash";
+    if (capability === "image") {
+        if (currentModel && config.models.includes(currentModel)) return currentModel;
+        if (config.imageModel && config.models.includes(config.imageModel)) return config.imageModel;
+        return defaultImage;
+    }
+    if (capability === "text") {
+        if (currentModel && config.models.includes(currentModel)) return currentModel;
+        if (config.textModel && config.models.includes(config.textModel)) return config.textModel;
+        return defaultText;
+    }
+    const defaultModel = capability === "video" ? config.videoModel : config.audioModel;
+    return defaultModel || defaultImage;
 }
 
 export function selectableModelsByCapability(config: AiConfig, capability?: ModelCapability) {
@@ -198,9 +209,8 @@ export function resolveModelScript(config: AiConfig, value: string) {
     return findChannelModel(config, value)?.model.script?.trim() || "";
 }
 
-function isAiConfigReady(config: AiConfig, model: string) {
-    const channel = resolveModelChannel(config, model);
-    return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
+function isAiConfigReady(_config?: AiConfig, _model?: string) {
+    return true;
 }
 
 export const useConfigStore = create<ConfigStore>()(
@@ -211,18 +221,17 @@ export const useConfigStore = create<ConfigStore>()(
             isConfigOpen: false,
             configTab: "channels",
             shouldPromptContinue: false,
-            updateConfig: (key, value) =>
+            updateConfig: (key, value) => {
+                if (key === "channels" || key === "baseUrl" || key === "apiKey") return;
                 set((state) => ({
                     config: {
                         ...state.config,
                         [key]: value,
                     },
-                })),
-            importChannelCredentials: (input) => {
-                const currentConfig = get().config;
-                const result = upsertChannelCredentials(currentConfig, input);
-                if (result.config !== currentConfig) set({ config: result.config });
-                return { status: result.status, channelName: result.channelName };
+                }));
+            },
+            importChannelCredentials: () => {
+                return { status: "missing-base-url" };
             },
             updateWebdavConfig: (key, value) =>
                 set((state) => ({
@@ -231,9 +240,9 @@ export const useConfigStore = create<ConfigStore>()(
                         [key]: value,
                     },
                 })),
-            isAiConfigReady: (config, model) => isAiConfigReady(config, model),
-            openConfigDialog: (shouldPromptContinue = false, configTab = "channels") => set({ isConfigOpen: true, shouldPromptContinue, configTab }),
-            setConfigDialogOpen: (isConfigOpen) => set({ isConfigOpen }),
+            isAiConfigReady: () => true,
+            openConfigDialog: () => {},
+            setConfigDialogOpen: () => {},
             clearPromptContinue: () => set({ shouldPromptContinue: false }),
         }),
         {
@@ -244,8 +253,11 @@ export const useConfigStore = create<ConfigStore>()(
                 const persistedConfig = (persistedState.config || {}) as Partial<AiConfig>;
                 const persistedWebdav = (persistedState.webdav || {}) as Partial<WebdavSyncConfig>;
                 const config = { ...defaultConfig, ...persistedConfig };
-                if (!Array.isArray(persistedConfig.channels)) config.channels = [];
-                const channels = normalizeChannels(config);
+                config.channels = defaultConfig.channels;
+                config.baseUrl = defaultConfig.baseUrl;
+                config.apiKey = defaultConfig.apiKey;
+                config.apiFormat = defaultConfig.apiFormat;
+                const channels = defaultConfig.channels;
                 const models = modelOptionsFromChannels(channels);
                 return {
                     ...current,
@@ -270,9 +282,9 @@ export const useConfigStore = create<ConfigStore>()(
                         videoGenerateAudio: config.videoGenerateAudio || "true",
                         videoWatermark: config.videoWatermark || "false",
                         videoMode: config.videoMode === "reference" ? "reference" : "frames",
-                        canvasImageCount: config.canvasImageCount || "3",
-                        proxyEnabled: Boolean(config.proxyEnabled),
-                        proxyUrl: config.proxyUrl || DEFAULT_LOCAL_PROXY_URL,
+                        canvasImageCount: config.canvasImageCount || "1",
+                        proxyEnabled: false,
+                        proxyUrl: DEFAULT_LOCAL_PROXY_URL,
                     },
                 };
             },
