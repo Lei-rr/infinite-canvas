@@ -11,12 +11,12 @@ const BACKUP_DIR = "/app/data/images";
 // 环境变量配置 (直接在 docker-compose.yml 的 environment 中配置)
 const UPSTREAM_URL = (process.env.UPSTREAM_URL || "http://localhost:3000").replace(/\/+$/, "");
 const UPSTREAM_KEY = process.env.UPSTREAM_KEY || "";
-const MAX_RETRIES = Number(process.env.MAX_RETRIES || 5);
-const RETRY_DELAY_MS = Number(process.env.RETRY_DELAY_MS || 2000);
+const MAX_RETRIES = Number(process.env.MAX_RETRIES || 3);
+const RETRY_DELAY_MS = Number(process.env.RETRY_DELAY_MS || 1500);
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 10);
 const STAGGER_INTERVAL_MS = Number(process.env.STAGGER_INTERVAL_MS || 1200);
-const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 120000);
-const IMAGE_DOWNLOAD_TIMEOUT_MS = Number(process.env.IMAGE_DOWNLOAD_TIMEOUT_MS || 120000);
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 45000);
+const IMAGE_DOWNLOAD_TIMEOUT_MS = Number(process.env.IMAGE_DOWNLOAD_TIMEOUT_MS || 45000);
 
 // 确保图片本地持久化目录就绪
 try {
