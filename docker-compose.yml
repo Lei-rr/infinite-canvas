@@ -13,5 +13,5 @@ services:
       UPSTREAM_KEY: "sk-your-api-key"
       MAX_RETRIES: "5"
       RETRY_DELAY_MS: "2000"
-      MAX_CONCURRENT: "3"
+      MAX_CONCURRENT: "10"
       STAGGER_INTERVAL_MS: "1200"

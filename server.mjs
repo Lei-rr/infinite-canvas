@@ -13,7 +13,7 @@ const UPSTREAM_URL = (process.env.UPSTREAM_URL || "http://localhost:3000").repla
 const UPSTREAM_KEY = process.env.UPSTREAM_KEY || "";
 const MAX_RETRIES = Number(process.env.MAX_RETRIES || 5);
 const RETRY_DELAY_MS = Number(process.env.RETRY_DELAY_MS || 2000);
-const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 3);
+const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 10);
 const STAGGER_INTERVAL_MS = Number(process.env.STAGGER_INTERVAL_MS || 1200);
 
 // 确保图片本地持久化目录就绪
