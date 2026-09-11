@@ -25,12 +25,32 @@ try {
   console.warn("Failed to create backup dir:", e.message);
 }
 
-// 内存映射：图片文件名 -> 上游原始绝对下载地址
-const imageUpstreamMap = new Map();
+// 优化 1: 防内存泄漏的有限容量 LRU Map
+class BoundedMap {
+  constructor(max = 2000) {
+    this.max = max;
+    this.map = new Map();
+  }
+  set(key, val) {
+    if (this.map.size >= this.max) {
+      const oldestKey = this.map.keys().next().value;
+      this.map.delete(oldestKey);
+    }
+    this.map.set(key, val);
+  }
+  get(key) {
+    return this.map.get(key);
+  }
+  delete(key) {
+    return this.map.delete(key);
+  }
+}
+
+const imageUpstreamMap = new BoundedMap(2000);
 
 // 带错峰平滑调度的并发队列 (避免瞬时多并发撞毁同一个上游 Token)
 class ConcurrencyQueue {
-  constructor(max = 3, minIntervalMs = 1200) {
+  constructor(max = 10, minIntervalMs = 1200) {
     this.max = max;
     this.active = 0;
     this.waiting = [];
@@ -38,9 +58,17 @@ class ConcurrencyQueue {
     this.lastDispatchedAt = 0;
   }
 
-  async acquire() {
-    return new Promise((resolve) => {
+  async acquire(abortSignal) {
+    return new Promise((resolve, reject) => {
+      if (abortSignal?.aborted) {
+        return reject(new Error("Request aborted before queue acquired"));
+      }
+
       const execute = async () => {
+        if (abortSignal?.aborted) {
+          this.release();
+          return reject(new Error("Request aborted in queue"));
+        }
         this.active++;
         const now = Date.now();
         const elapsed = now - this.lastDispatchedAt;
@@ -86,11 +114,24 @@ const CORS_HEADERS = {
 };
 
 function sendJson(res, statusCode, data) {
+  if (res.writableEnded) return;
   res.writeHead(statusCode, {
     ...CORS_HEADERS,
     "Content-Type": "application/json; charset=utf-8",
   });
   res.end(JSON.stringify(data));
+}
+
+// 优化 2: 动态 MIME 类型解析
+function getMimeType(filename) {
+  const ext = path.extname(filename).toLowerCase();
+  switch (ext) {
+    case ".png": return "image/png";
+    case ".webp": return "image/webp";
+    case ".gif": return "image/gif";
+    case ".svg": return "image/svg+xml";
+    default: return "image/jpeg";
+  }
 }
 
 // 画幅比例注入 (--ar 1:1, 16:9, etc.)
@@ -128,12 +169,16 @@ function extractImageUrl(content) {
 }
 
 // 带指数退避与随机抖动的重试控制函数
-async function withRetry(fn, taskName = "生图操作", maxRetries = MAX_RETRIES) {
+async function withRetry(fn, taskName = "生图操作", maxRetries = MAX_RETRIES, abortSignal) {
   let lastError;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    if (abortSignal?.aborted) {
+      throw new Error("Client aborted");
+    }
     try {
       return await fn(attempt);
     } catch (err) {
+      if (abortSignal?.aborted) throw err;
       lastError = err;
       console.warn(`[重试] ${taskName} 第 ${attempt}/${maxRetries} 次失败: ${err.message}`);
       if (attempt < maxRetries) {
@@ -160,11 +205,12 @@ function rewriteImageUrl(originalUrl) {
   }
 }
 
-// 异步下载图片落盘存储
+// 异步下载图片落盘存储 (落盘后安全从 Map 清理，杜绝内存泄漏)
 async function backupImage(filename, originalUrl) {
   const dest = path.join(BACKUP_DIR, filename);
   try {
     await fs.access(dest);
+    imageUpstreamMap.delete(filename);
     return;
   } catch {}
 
@@ -173,23 +219,25 @@ async function backupImage(filename, originalUrl) {
     if (!res.ok) return;
     const arrayBuffer = await res.arrayBuffer();
     await fs.writeFile(dest, Buffer.from(arrayBuffer));
+    imageUpstreamMap.delete(filename);
     console.log(`[持久化] 图片已成功保存至本地: ${dest}`);
   } catch (err) {
     console.warn(`[持久化] 异步下载备份图片失败 (${originalUrl}):`, err.message);
   }
 }
 
-// 本地图片流式直出服务
+// 本地图片流式直出服务 (带动态 MIME 与安全读写)
 async function serveImage(req, res, filename) {
   const safeFilename = path.basename(filename);
   const localPath = path.join(BACKUP_DIR, safeFilename);
+  const contentType = getMimeType(safeFilename);
 
   // 1. 本地缓存命中，直接以高性能只读流返回
   try {
     const stat = await fs.stat(localPath);
     res.writeHead(200, {
       ...CORS_HEADERS,
-      "Content-Type": "image/jpeg",
+      "Content-Type": contentType,
       "Content-Length": stat.size,
       "Cache-Control": "public, max-age=604800, immutable",
     });
@@ -211,9 +259,8 @@ async function serveImage(req, res, filename) {
 
     const arrayBuffer = await upRes.arrayBuffer();
     const buf = Buffer.from(arrayBuffer);
-    fs.writeFile(localPath, buf).catch(() => {});
+    fs.writeFile(localPath, buf).then(() => imageUpstreamMap.delete(safeFilename)).catch(() => {});
 
-    const contentType = upRes.headers.get("content-type") || "image/jpeg";
     res.writeHead(200, {
       ...CORS_HEADERS,
       "Content-Type": contentType,
@@ -230,8 +277,15 @@ async function serveImage(req, res, filename) {
   }
 }
 
-// 核心文生图处理函数
+// 核心文生图处理函数 (加入客户端断开感知与 Abort 释放)
 async function handleGenerate(req, res) {
+  const clientAbort = new AbortController();
+  req.on("close", () => {
+    if (!res.writableEnded) {
+      clientAbort.abort();
+    }
+  });
+
   let bodyText = "";
   for await (const chunk of req) {
     bodyText += chunk;
@@ -252,9 +306,12 @@ async function handleGenerate(req, res) {
 
   try {
     const fetchSingle = async (index) => {
-      const release = await queue.acquire();
+      const release = await queue.acquire(clientAbort.signal);
       try {
         return await withRetry(async () => {
+          const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+          const combinedSignal = AbortSignal.any ? AbortSignal.any([clientAbort.signal, timeoutSignal]) : timeoutSignal;
+
           const upRes = await fetch(`${UPSTREAM_URL}/v1/chat/completions`, {
             method: "POST",
             headers: {
@@ -272,7 +329,7 @@ async function handleGenerate(req, res) {
               ],
               stream: false,
             }),
-            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+            signal: combinedSignal,
           });
 
           if (!upRes.ok) {
@@ -293,7 +350,7 @@ async function handleGenerate(req, res) {
           }
 
           return rewriteImageUrl(imgUrl);
-        }, `生图任务 #${index + 1}`);
+        }, `生图任务 #${index + 1}`, MAX_RETRIES, clientAbort.signal);
       } finally {
         release();
       }
@@ -306,6 +363,10 @@ async function handleGenerate(req, res) {
       data: urls.map((url) => ({ url })),
     });
   } catch (err) {
+    if (clientAbort.signal.aborted) {
+      console.log("[BFF] 客户端已断开，取消当前生图任务");
+      return;
+    }
     console.error("[BFF] 生图最终失败:", err.message);
     return sendJson(res, 500, { error: { message: err.message || "生图失败" } });
   }
@@ -313,6 +374,13 @@ async function handleGenerate(req, res) {
 
 // 核心图生图/多模态图片编辑处理函数
 async function handleEdits(req, res) {
+  const clientAbort = new AbortController();
+  req.on("close", () => {
+    if (!res.writableEnded) {
+      clientAbort.abort();
+    }
+  });
+
   try {
     const webReq = new Request("http://localhost" + req.url, {
       method: req.method,
@@ -346,9 +414,12 @@ async function handleEdits(req, res) {
     console.log(`[BFF] 图生图/编辑请求: model=${model}, refImages=${imageParts.length}, prompt="${prompt.slice(0, 45)}..."`);
 
     const fetchSingle = async (index) => {
-      const release = await queue.acquire();
+      const release = await queue.acquire(clientAbort.signal);
       try {
         return await withRetry(async () => {
+          const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+          const combinedSignal = AbortSignal.any ? AbortSignal.any([clientAbort.signal, timeoutSignal]) : timeoutSignal;
+
           const upRes = await fetch(`${UPSTREAM_URL}/v1/chat/completions`, {
             method: "POST",
             headers: {
@@ -366,7 +437,7 @@ async function handleEdits(req, res) {
               ],
               stream: false,
             }),
-            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+            signal: combinedSignal,
           });
 
           if (!upRes.ok) {
@@ -387,7 +458,7 @@ async function handleEdits(req, res) {
           }
 
           return rewriteImageUrl(imgUrl);
-        }, `图生图任务 #${index + 1}`);
+        }, `图生图任务 #${index + 1}`, MAX_RETRIES, clientAbort.signal);
       } finally {
         release();
       }
@@ -400,13 +471,24 @@ async function handleEdits(req, res) {
       data: urls.map((url) => ({ url })),
     });
   } catch (err) {
+    if (clientAbort.signal.aborted) {
+      console.log("[BFF] 客户端已断开，取消图生图任务");
+      return;
+    }
     console.error("[BFF] 图生图最终失败:", err.message);
     return sendJson(res, 500, { error: { message: err.message || "图生图失败" } });
   }
 }
 
-// 适配前端画布调用的 /v1/responses 协议 (包含 OpenAI Chat Stream 转换为 Responses Stream)
+// 适配前端画布调用的 /v1/responses 协议 (安全流式异常兜底)
 async function handleResponses(req, res) {
+  const clientAbort = new AbortController();
+  req.on("close", () => {
+    if (!res.writableEnded) {
+      clientAbort.abort();
+    }
+  });
+
   let bodyText = "";
   for await (const chunk of req) {
     bodyText += chunk;
@@ -434,6 +516,9 @@ async function handleResponses(req, res) {
 
   const isStream = Boolean(body.stream);
   try {
+    const timeoutSignal = AbortSignal.timeout(120000);
+    const combinedSignal = AbortSignal.any ? AbortSignal.any([clientAbort.signal, timeoutSignal]) : timeoutSignal;
+
     const upRes = await fetch(`${UPSTREAM_URL}/v1/chat/completions`, {
       method: "POST",
       headers: {
@@ -446,7 +531,7 @@ async function handleResponses(req, res) {
         messages,
         stream: isStream,
       }),
-      signal: AbortSignal.timeout(120000),
+      signal: combinedSignal,
     });
 
     if (!upRes.ok) {
@@ -482,34 +567,43 @@ async function handleResponses(req, res) {
     const decoder = new TextDecoder();
     let buffer = "";
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+    try {
+      while (true) {
+        if (clientAbort.signal.aborted) break;
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const dataStr = trimmed.slice(5).trim();
-        if (dataStr === "[DONE]") continue;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+          const dataStr = trimmed.slice(5).trim();
+          if (dataStr === "[DONE]") continue;
 
-        try {
-          const json = JSON.parse(dataStr);
-          const delta = json?.choices?.[0]?.delta?.content || "";
-          if (delta) {
-            fullText += delta;
-            res.write(`data: ${JSON.stringify({ type: "response.output_text.delta", delta })}\n\n`);
-          }
-        } catch {}
+          try {
+            const json = JSON.parse(dataStr);
+            const delta = json?.choices?.[0]?.delta?.content || "";
+            if (delta) {
+              fullText += delta;
+              res.write(`data: ${JSON.stringify({ type: "response.output_text.delta", delta })}\n\n`);
+            }
+          } catch {}
+        }
+      }
+
+      if (!clientAbort.signal.aborted) {
+        res.write(`data: ${JSON.stringify({ type: "response.completed", response: { output_text: fullText } })}\n\n`);
+        res.write("data: [DONE]\n\n");
+      }
+    } finally {
+      if (!res.writableEnded) {
+        res.end();
       }
     }
-
-    res.write(`data: ${JSON.stringify({ type: "response.completed", response: { output_text: fullText } })}\n\n`);
-    res.write("data: [DONE]\n\n");
-    res.end();
   } catch (err) {
+    if (clientAbort.signal.aborted) return;
     console.error("[BFF] 处理 /responses 失败:", err.message);
     if (!res.headersSent) {
       sendJson(res, 500, { error: { message: err.message } });
