@@ -308,10 +308,7 @@ async function handleGenerate(req, res) {
   const model = body.model || "gemini-3.1-flash-image";
   const prompt = injectAspectRatio(body.prompt || "", body.size);
   const count = Math.max(1, Math.min(10, Number(body.n) || 1));
-  const messages = [
-    { role: "system", content: "You are an AI image generation engine. You must directly generate and output an image matching the prompt. Do not reply with conversational text, advice, or suggestions." },
-    { role: "user", content: prompt },
-  ];
+  const messages = [{ role: "user", content: prompt }];
 
   console.log(`[BFF] 文生图请求: model=${model}, count=${count}, prompt="${prompt.slice(0, 45)}..."`);
 
@@ -352,7 +349,6 @@ async function handleEdits(req, res) {
     }
 
     const messages = [
-      { role: "system", content: "You are an AI image editing engine. Directly output the generated image without conversational text." },
       { role: "user", content: [{ type: "text", text: prompt }, ...imageParts] },
     ];
 
