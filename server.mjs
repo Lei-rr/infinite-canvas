@@ -79,36 +79,49 @@ async function saveBase64Image(b64Str) {
   return `/images/${filename}`;
 }
 
-// 统一图片解析器：支持 Markdown URL、裸 URL、JSON 对象与 Base64 数据
-async function resolveImageResult(rawContent) {
-  if (!rawContent) return null;
+// 统一图片解析器：支持 message.images 数组、Markdown URL、裸 URL 与 Base64 数据
+async function resolveImageResult(message) {
+  if (!message) return null;
 
-  let content = rawContent;
-  if (typeof content === "object") {
-    const candidate = content.content || content.image || content.url || content.b64_json || content.data;
-    if (candidate) content = candidate;
-    else content = JSON.stringify(content);
+  // 1. 优先检查 message.images 数组（New-API / OpenAI 格式生图标准字段）
+  if (Array.isArray(message.images) && message.images.length > 0) {
+    for (const item of message.images) {
+      const candidate = item?.image_url?.url || item?.url || item?.b64_json;
+      if (candidate && typeof candidate === "string") {
+        if (candidate.startsWith("data:image/") || candidate.startsWith("/9j/")) {
+          return await saveBase64Image(candidate);
+        }
+        if (/^https?:\/\//i.test(candidate)) {
+          return rewriteImageUrl(candidate);
+        }
+      }
+    }
   }
 
-  if (typeof content !== "string") return null;
+  // 2. 检查 message.content
+  let content = message.content;
+  if (typeof content === "object" && content !== null) {
+    content = content.content || content.image || content.url || content.b64_json || content.data || JSON.stringify(content);
+  }
 
-  // 1. Markdown 链接 ![...](url)
+  if (typeof content !== "string" || !content.trim()) return null;
+
+  // 3. Markdown 链接 ![...](url)
   const mdMatch = content.match(/!\[.*?\]\((https?:\/\/[^\s\)]+)\)/);
   if (mdMatch) return rewriteImageUrl(mdMatch[1]);
-
-  // 2. HTTP(S) URL
-  const urlMatch = content.match(/(https?:\/\/[^\s"'<>]+\.(?:png|jpg|jpeg|webp|gif)(?:\?[^\s"'<>]*)?)/i);
-  if (urlMatch) return rewriteImageUrl(urlMatch[1]);
-
-  // 3. 裸 URL
-  const rawUrl = content.trim().match(/^https?:\/\/[^\s]+$/)?.[0];
-  if (rawUrl) return rewriteImageUrl(rawUrl);
 
   // 4. Markdown 格式的 Base64 图片
   const mdB64 = content.match(/!\[.*?\]\((data:image\/[a-zA-Z]+;base64,[^\s\)]+)\)/);
   if (mdB64) return await saveBase64Image(mdB64[1]);
 
-  // 5. 纯 Base64 图片数据
+  // 5. HTTP(S) URL
+  const urlMatch = content.match(/(https?:\/\/[^\s"'<>]+\.(?:png|jpg|jpeg|webp|gif)(?:\?[^\s"'<>]*)?)/i);
+  if (urlMatch) return rewriteImageUrl(urlMatch[1]);
+
+  const rawUrl = content.trim().match(/^https?:\/\/[^\s]+$/)?.[0];
+  if (rawUrl) return rewriteImageUrl(rawUrl);
+
+  // 6. 纯 Base64 图片数据
   const trimmed = content.trim();
   if (trimmed.startsWith("data:image/") || trimmed.startsWith("/9j/") || (trimmed.length > 200 && /^[A-Za-z0-9+/=\r\n]+$/.test(trimmed.slice(0, 100)))) {
     return await saveBase64Image(trimmed);
@@ -278,13 +291,12 @@ async function requestUpstreamImage(messages, model, taskName) {
 
       const data = await upRes.json();
       const choice = data?.choices?.[0];
-      const rawContent = choice?.message?.content;
-      const imgUrl = await resolveImageResult(rawContent);
+      const imgUrl = await resolveImageResult(choice?.message);
 
       if (!imgUrl) {
         const finishReason = choice?.finish_reason || "unknown";
-        const contentStr = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent || "");
-        console.warn(`[BFF] 生图未出图: finish_reason=${finishReason}, content="${contentStr.slice(0, 80)}"`);
+        const contentStr = JSON.stringify(choice?.message || "");
+        console.warn(`[BFF] 生图未出图: finish_reason=${finishReason}, message="${contentStr.slice(0, 100)}"`);
         throw new Error(`上游未返回有效图片 (finish_reason: ${finishReason})`);
       }
       return imgUrl;
