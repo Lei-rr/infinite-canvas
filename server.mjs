@@ -68,14 +68,53 @@ function injectAspectRatio(prompt, size) {
   return matched ? `${prompt.trim()} --ar ${matched[1]}` : prompt;
 }
 
-// 从上游返回文本中提取图片直链（支持 Markdown 与裸 URL）
-function extractImageUrl(content) {
-  if (!content || typeof content !== "string") return null;
+// 保存 Base64 图片数据到本地持久化目录
+async function saveBase64Image(b64Str) {
+  const cleanB64 = b64Str.replace(/^data:image\/[a-zA-Z]+;base64,/, "");
+  const buf = Buffer.from(cleanB64, "base64");
+  const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 9)}.jpg`;
+  const dest = path.join(BACKUP_DIR, filename);
+  await fs.writeFile(dest, buf);
+  console.log(`[持久化] Base64 图片已成功保存至: ${dest}`);
+  return `/images/${filename}`;
+}
+
+// 统一图片解析器：支持 Markdown URL、裸 URL、JSON 对象与 Base64 数据
+async function resolveImageResult(rawContent) {
+  if (!rawContent) return null;
+
+  let content = rawContent;
+  if (typeof content === "object") {
+    const candidate = content.content || content.image || content.url || content.b64_json || content.data;
+    if (candidate) content = candidate;
+    else content = JSON.stringify(content);
+  }
+
+  if (typeof content !== "string") return null;
+
+  // 1. Markdown 链接 ![...](url)
   const mdMatch = content.match(/!\[.*?\]\((https?:\/\/[^\s\)]+)\)/);
-  if (mdMatch) return mdMatch[1];
+  if (mdMatch) return rewriteImageUrl(mdMatch[1]);
+
+  // 2. HTTP(S) URL
   const urlMatch = content.match(/(https?:\/\/[^\s"'<>]+\.(?:png|jpg|jpeg|webp|gif)(?:\?[^\s"'<>]*)?)/i);
-  if (urlMatch) return urlMatch[1];
-  return content.trim().match(/^https?:\/\/[^\s]+$/)?.[0] || null;
+  if (urlMatch) return rewriteImageUrl(urlMatch[1]);
+
+  // 3. 裸 URL
+  const rawUrl = content.trim().match(/^https?:\/\/[^\s]+$/)?.[0];
+  if (rawUrl) return rewriteImageUrl(rawUrl);
+
+  // 4. Markdown 格式的 Base64 图片
+  const mdB64 = content.match(/!\[.*?\]\((data:image\/[a-zA-Z]+;base64,[^\s\)]+)\)/);
+  if (mdB64) return await saveBase64Image(mdB64[1]);
+
+  // 5. 纯 Base64 图片数据
+  const trimmed = content.trim();
+  if (trimmed.startsWith("data:image/") || trimmed.startsWith("/9j/") || (trimmed.length > 200 && /^[A-Za-z0-9+/=\r\n]+$/.test(trimmed.slice(0, 100)))) {
+    return await saveBase64Image(trimmed);
+  }
+
+  return null;
 }
 
 // 防内存泄漏的容量限制 Map
@@ -239,15 +278,16 @@ async function requestUpstreamImage(messages, model, taskName) {
 
       const data = await upRes.json();
       const choice = data?.choices?.[0];
-      const content = choice?.message?.content || "";
-      const imgUrl = extractImageUrl(content);
+      const rawContent = choice?.message?.content;
+      const imgUrl = await resolveImageResult(rawContent);
 
       if (!imgUrl) {
         const finishReason = choice?.finish_reason || "unknown";
-        console.warn(`[BFF] 生图未出图: finish_reason=${finishReason}, content="${content.slice(0, 80)}"`);
+        const contentStr = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent || "");
+        console.warn(`[BFF] 生图未出图: finish_reason=${finishReason}, content="${contentStr.slice(0, 80)}"`);
         throw new Error(`上游未返回有效图片 (finish_reason: ${finishReason})`);
       }
-      return rewriteImageUrl(imgUrl);
+      return imgUrl;
     }, taskName, MAX_RETRIES);
   } finally {
     release();
