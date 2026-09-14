@@ -79,6 +79,8 @@ export const DEFAULT_LOCAL_PROXY_URL = "http://127.0.0.1:23210";
 
 export const DEFAULT_CHANNEL_MODELS: ChannelModel[] = [
     { name: "gemini-3.1-flash-image", capability: "image" },
+    { name: "gemini-3.1-flash-image-2K", capability: "image" },
+    { name: "gemini-3.1-flash-image-4K", capability: "image" },
 ];
 
 export const defaultConfig: AiConfig = {
@@ -112,7 +114,11 @@ export const defaultConfig: AiConfig = {
     videoMode: "frames",
     systemPrompt: "",
     reasoningEffort: "auto",
-    models: ["default::gemini-3.1-flash-image"],
+    models: [
+        "default::gemini-3.1-flash-image",
+        "default::gemini-3.1-flash-image-2K",
+        "default::gemini-3.1-flash-image-4K",
+    ],
     quality: "auto",
     size: "1:1",
     background: "",

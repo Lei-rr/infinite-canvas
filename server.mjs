@@ -20,10 +20,12 @@ const IMAGE_TIMEOUT_MS = Number(process.env.IMAGE_DOWNLOAD_TIMEOUT_MS || 45000);
 
 const DEFAULT_IMAGE_MODEL = process.env.IMAGE_MODEL || "gemini-3.1-flash-image";
 
-// 支持的模型列表（纯生图模型）
-const SUPPORTED_MODELS = [
-  { id: DEFAULT_IMAGE_MODEL, object: "model" },
-];
+// 支持的模型列表（支持环境变量 MODELS 自定义逗号分隔，默认提供标准、2K、4K）
+const SUPPORTED_MODELS = (process.env.MODELS || "gemini-3.1-flash-image,gemini-3.1-flash-image-2K,gemini-3.1-flash-image-4K")
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean)
+  .map((id) => ({ id, object: "model" }));
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
