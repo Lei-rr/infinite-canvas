@@ -11,16 +11,15 @@ const PORT = 8000;
 const BACKUP_DIR = "/app/data/images";
 const UPSTREAM_URL = (process.env.UPSTREAM_URL || "http://localhost:3000").replace(/\/+$/, "");
 const UPSTREAM_KEY = process.env.UPSTREAM_KEY || "";
+
 const MAX_RETRIES = Number(process.env.MAX_RETRIES || 3);
 const RETRY_DELAY_MS = Number(process.env.RETRY_DELAY_MS || 1500);
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 10);
 const STAGGER_INTERVAL_MS = Number(process.env.STAGGER_INTERVAL_MS || 1000);
-const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 45000);
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 90000);
 const IMAGE_TIMEOUT_MS = Number(process.env.IMAGE_DOWNLOAD_TIMEOUT_MS || 45000);
 
 const DEFAULT_IMAGE_MODEL = process.env.IMAGE_MODEL || "gemini-3.1-flash-image";
-
-// 支持的模型列表（默认提供 Gemini 1K/2K/4K 与 gpt-image-2）
 const DEFAULT_MODELS_STR = "gemini-3.1-flash-image,gemini-3.1-flash-image-2K,gemini-3.1-flash-image-4K,gpt-image-2";
 const SUPPORTED_MODELS = (process.env.MODELS || DEFAULT_MODELS_STR)
   .split(",")
@@ -39,109 +38,8 @@ const CORS_HEADERS = {
 fs.mkdir(BACKUP_DIR, { recursive: true }).catch(() => {});
 
 // ==========================================
-// 2. 基础工具与并发队列
+// 2. 核心存储与本地持久化模块 (Storage Service)
 // ==========================================
-
-// JSON 快捷响应
-function sendJson(res, statusCode, data) {
-  if (res.writableEnded) return;
-  res.writeHead(statusCode, { ...CORS_HEADERS, "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(data));
-}
-
-// 动态推导图片 MIME 类型
-function getMimeType(filename) {
-  const ext = path.extname(filename).toLowerCase();
-  const map = { ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif", ".svg": "image/svg+xml" };
-  return map[ext] || "image/jpeg";
-}
-
-// 画幅比例注入（识别 size 并推导 --ar 1:1 / 16:9 等）
-function injectAspectRatio(prompt, size) {
-  if (!size || typeof size !== "string" || /--ar\s+\d+:\d+/i.test(prompt)) return prompt;
-  const [w, h] = size.split("x").map(Number);
-  if (!w || !h) return prompt;
-  const ratio = w / h;
-  const ratios = [
-    [16 / 9, "16:9"], [9 / 16, "9:16"], [4 / 3, "4:3"],
-    [3 / 4, "3:4"], [1, "1:1"], [21 / 9, "21:9"]
-  ];
-  const matched = ratios.find(([r]) => Math.abs(ratio - r) < 0.05);
-  return matched ? `${prompt.trim()} --ar ${matched[1]}` : prompt;
-}
-
-// 严格绘图指令包装（强制模型必须输出图片，严禁闲聊、解释或回复普通文本）
-function formatImagePrompt(rawPrompt) {
-  const p = (rawPrompt || "").trim();
-  if (/^(draw|generate|create|render)\s+an?\s+image/i.test(p)) {
-    return p;
-  }
-  return `Generate an image depicting: "${p}". Do not chat, explain, or output text. Directly invoke the image generation tool.`;
-}
-
-// 保存 Base64 图片数据到本地持久化目录
-async function saveBase64Image(b64Str) {
-  const cleanB64 = b64Str.replace(/^data:image\/[a-zA-Z]+;base64,/, "");
-  const buf = Buffer.from(cleanB64, "base64");
-  const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 9)}.jpg`;
-  const dest = path.join(BACKUP_DIR, filename);
-  await fs.writeFile(dest, buf);
-  console.log(`[持久化] Base64 图片已成功保存至: ${dest}`);
-  return `/images/${filename}`;
-}
-
-// 统一图片解析器：支持 message.images 数组、Markdown URL、裸 URL 与 Base64 数据
-async function resolveImageResult(message) {
-  if (!message) return null;
-
-  // 1. 优先检查 message.images 数组（New-API / OpenAI 格式生图标准字段）
-  if (Array.isArray(message.images) && message.images.length > 0) {
-    for (const item of message.images) {
-      const candidate = item?.image_url?.url || item?.url || item?.b64_json;
-      if (candidate && typeof candidate === "string") {
-        if (candidate.startsWith("data:image/") || candidate.startsWith("/9j/")) {
-          return await saveBase64Image(candidate);
-        }
-        if (/^https?:\/\//i.test(candidate)) {
-          return rewriteImageUrl(candidate);
-        }
-      }
-    }
-  }
-
-  // 2. 检查 message.content
-  let content = message.content;
-  if (typeof content === "object" && content !== null) {
-    content = content.content || content.image || content.url || content.b64_json || content.data || JSON.stringify(content);
-  }
-
-  if (typeof content !== "string" || !content.trim()) return null;
-
-  // 3. Markdown 链接 ![...](url)
-  const mdMatch = content.match(/!\[.*?\]\((https?:\/\/[^\s\)]+)\)/);
-  if (mdMatch) return rewriteImageUrl(mdMatch[1]);
-
-  // 4. Markdown 格式的 Base64 图片
-  const mdB64 = content.match(/!\[.*?\]\((data:image\/[a-zA-Z]+;base64,[^\s\)]+)\)/);
-  if (mdB64) return await saveBase64Image(mdB64[1]);
-
-  // 5. HTTP(S) URL
-  const urlMatch = content.match(/(https?:\/\/[^\s"'<>]+\.(?:png|jpg|jpeg|webp|gif)(?:\?[^\s"'<>]*)?)/i);
-  if (urlMatch) return rewriteImageUrl(urlMatch[1]);
-
-  const rawUrl = content.trim().match(/^https?:\/\/[^\s]+$/)?.[0];
-  if (rawUrl) return rewriteImageUrl(rawUrl);
-
-  // 6. 纯 Base64 图片数据
-  const trimmed = content.trim();
-  if (trimmed.startsWith("data:image/") || trimmed.startsWith("/9j/") || (trimmed.length > 200 && /^[A-Za-z0-9+/=\r\n]+$/.test(trimmed.slice(0, 100)))) {
-    return await saveBase64Image(trimmed);
-  }
-
-  return null;
-}
-
-// 防内存泄漏的容量限制 Map
 class BoundedMap {
   constructor(max = 2000) {
     this.max = max;
@@ -156,7 +54,105 @@ class BoundedMap {
 }
 const imageUpstreamMap = new BoundedMap(2000);
 
-// 标准无死锁并发队列 (参考 gemini-studio)
+function sendJson(res, statusCode, data) {
+  if (res.writableEnded) return;
+  res.writeHead(statusCode, { ...CORS_HEADERS, "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(data));
+}
+
+function getMimeType(filename) {
+  const ext = path.extname(filename).toLowerCase();
+  const mimeMap = { ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif", ".svg": "image/svg+xml" };
+  return mimeMap[ext] || "image/jpeg";
+}
+
+// 异步持久化 Base64 图片
+async function saveBase64Image(b64Str) {
+  const cleanB64 = b64Str.replace(/^data:image\/[a-zA-Z]+;base64,/, "");
+  const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 9)}.jpg`;
+  const dest = path.join(BACKUP_DIR, filename);
+  await fs.writeFile(dest, Buffer.from(cleanB64, "base64"));
+  console.log(`[持久化] Base64 图片已成功保存至: ${dest}`);
+  return `/images/${filename}`;
+}
+
+// 异步下载远程图片写盘
+async function backupRemoteImage(filename, remoteUrl) {
+  const dest = path.join(BACKUP_DIR, filename);
+  try {
+    await fs.access(dest);
+    imageUpstreamMap.delete(filename);
+    return;
+  } catch {}
+  try {
+    const res = await fetch(remoteUrl, { signal: AbortSignal.timeout(IMAGE_TIMEOUT_MS) });
+    if (!res.ok) return;
+    await fs.writeFile(dest, Buffer.from(await res.arrayBuffer()));
+    imageUpstreamMap.delete(filename);
+    console.log(`[持久化] 远程图片已下载保存至: ${dest}`);
+  } catch (err) {
+    console.warn(`[持久化] 异步下载备份失败 (${remoteUrl}):`, err.message);
+  }
+}
+
+// 改写图片直链
+function rewriteImageUrl(originalUrl) {
+  if (!originalUrl) return "";
+  try {
+    const filename = path.basename(new URL(originalUrl).pathname);
+    imageUpstreamMap.set(filename, originalUrl);
+    backupRemoteImage(filename, originalUrl);
+    return `/images/${filename}`;
+  } catch {
+    return originalUrl;
+  }
+}
+
+// 本地图片只读流直出服务
+async function serveImage(req, res, filename) {
+  const safeFilename = path.basename(filename);
+  const localPath = path.join(BACKUP_DIR, safeFilename);
+  const contentType = getMimeType(safeFilename);
+
+  // 1. 本地缓存命中秒出
+  try {
+    const stat = await fs.stat(localPath);
+    res.writeHead(200, {
+      ...CORS_HEADERS,
+      "Content-Type": contentType,
+      "Content-Length": stat.size,
+      "Cache-Control": "public, max-age=604800, immutable",
+    });
+    if (req.method === "HEAD") return res.end();
+    return fsSync.createReadStream(localPath).pipe(res);
+  } catch {}
+
+  // 2. 未命中时回源拉取
+  const upstreamUrl = imageUpstreamMap.get(safeFilename) || (UPSTREAM_URL ? `${UPSTREAM_URL}/images/${safeFilename}` : "");
+  if (!upstreamUrl) return sendJson(res, 404, { error: "Image not found" });
+
+  try {
+    const upRes = await fetch(upstreamUrl, { signal: AbortSignal.timeout(IMAGE_TIMEOUT_MS) });
+    if (!upRes.ok) return sendJson(res, upRes.status, { error: "Image not found on upstream" });
+    const buf = Buffer.from(await upRes.arrayBuffer());
+    fs.writeFile(localPath, buf).then(() => imageUpstreamMap.delete(safeFilename)).catch(() => {});
+
+    res.writeHead(200, {
+      ...CORS_HEADERS,
+      "Content-Type": contentType,
+      "Content-Length": buf.length,
+      "Cache-Control": "public, max-age=604800, immutable",
+    });
+    if (req.method === "HEAD") return res.end();
+    res.end(buf);
+  } catch (err) {
+    if (!res.headersSent) sendJson(res, 502, { error: `拉取上游图片失败: ${err.message}` });
+  }
+}
+
+// ==========================================
+// 3. 并发调度与重试控制 (Queue & Retry)
+// ==========================================
 class ConcurrencyQueue {
   constructor(max = 10) {
     this.max = max;
@@ -185,7 +181,6 @@ class ConcurrencyQueue {
 }
 const queue = new ConcurrencyQueue(MAX_CONCURRENT);
 
-// 指数退避与抖动重试控制
 async function withRetry(fn, taskName, maxRetries = MAX_RETRIES) {
   let lastErr;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -205,150 +200,142 @@ async function withRetry(fn, taskName, maxRetries = MAX_RETRIES) {
 }
 
 // ==========================================
-// 3. 图片本地持久化与流式服务
+// 4. 适配器模式生图引擎 (Image Engine Adapters)
 // ==========================================
 
-// 异步持久化到磁盘
-async function backupImage(filename, originalUrl) {
-  const dest = path.join(BACKUP_DIR, filename);
-  try {
-    await fs.access(dest);
-    imageUpstreamMap.delete(filename);
-    return;
-  } catch {}
-  try {
-    const res = await fetch(originalUrl, { signal: AbortSignal.timeout(IMAGE_TIMEOUT_MS) });
-    if (!res.ok) return;
-    await fs.writeFile(dest, Buffer.from(await res.arrayBuffer()));
-    imageUpstreamMap.delete(filename);
-    console.log(`[持久化] 图片已安全保存至: ${dest}`);
-  } catch (err) {
-    console.warn(`[持久化] 异步下载备份失败 (${originalUrl}):`, err.message);
-  }
+// 画幅比例注入 (--ar 1:1, 16:9 等)
+function injectAspectRatio(prompt, size) {
+  if (!size || typeof size !== "string" || /--ar\s+\d+:\d+/i.test(prompt)) return prompt;
+  const [w, h] = size.split("x").map(Number);
+  if (!w || !h) return prompt;
+  const ratio = w / h;
+  const ratios = [
+    [16 / 9, "16:9"], [9 / 16, "9:16"], [4 / 3, "4:3"],
+    [3 / 4, "3:4"], [1, "1:1"], [21 / 9, "21:9"]
+  ];
+  const matched = ratios.find(([r]) => Math.abs(ratio - r) < 0.05);
+  return matched ? `${prompt.trim()} --ar ${matched[1]}` : prompt;
 }
 
-// 改写上游 URL 为本地服务直链
-function rewriteImageUrl(originalUrl) {
-  if (!originalUrl) return "";
-  try {
-    const filename = path.basename(new URL(originalUrl).pathname);
-    imageUpstreamMap.set(filename, originalUrl);
-    backupImage(filename, originalUrl);
-    return `/images/${filename}`;
-  } catch {
-    return originalUrl;
-  }
+// 严格绘图指令包装（消除 Gemini 口语闲聊）
+function formatImagePrompt(rawPrompt) {
+  const p = (rawPrompt || "").trim();
+  if (/^(draw|generate|create|render)\s+an?\s+image/i.test(p)) return p;
+  return `Generate an image depicting: "${p}". Do not chat, explain, or output text. Directly invoke the image generation tool.`;
 }
 
-// 本地图片只读流直出服务
-async function serveImage(req, res, filename) {
-  const safeFilename = path.basename(filename);
-  const localPath = path.join(BACKUP_DIR, safeFilename);
-  const contentType = getMimeType(safeFilename);
+// 多格式图片响应提取解析器 (支持 message.images 数组、Markdown URL、裸 URL、Base64)
+async function resolveImageResult(message) {
+  if (!message) return null;
 
-  // 1. 本地缓存命中，只读流毫秒直出
-  try {
-    const stat = await fs.stat(localPath);
-    res.writeHead(200, {
-      ...CORS_HEADERS,
-      "Content-Type": contentType,
-      "Content-Length": stat.size,
-      "Cache-Control": "public, max-age=604800, immutable",
-    });
-    if (req.method === "HEAD") return res.end();
-    return fsSync.createReadStream(localPath).pipe(res);
-  } catch {}
-
-  // 2. 本地未命中，向上游实时拉取并写盘
-  const upstreamUrl = imageUpstreamMap.get(safeFilename) || (UPSTREAM_URL ? `${UPSTREAM_URL}/images/${safeFilename}` : "");
-  if (!upstreamUrl) return sendJson(res, 404, { error: "Image not found" });
-
-  try {
-    const upRes = await fetch(upstreamUrl, { signal: AbortSignal.timeout(IMAGE_TIMEOUT_MS) });
-    if (!upRes.ok) return sendJson(res, upRes.status, { error: "Image not found on upstream" });
-    const buf = Buffer.from(await upRes.arrayBuffer());
-    fs.writeFile(localPath, buf).then(() => imageUpstreamMap.delete(safeFilename)).catch(() => {});
-
-    res.writeHead(200, {
-      ...CORS_HEADERS,
-      "Content-Type": contentType,
-      "Content-Length": buf.length,
-      "Cache-Control": "public, max-age=604800, immutable",
-    });
-    if (req.method === "HEAD") return res.end();
-    res.end(buf);
-  } catch (err) {
-    if (!res.headersSent) sendJson(res, 502, { error: `拉取上游图片失败: ${err.message}` });
-  }
-}
-
-// ==========================================
-// 4. 业务处理：文生图、图生图、文本/推理
-// ==========================================
-
-// 单次生图调用（注入系统提示词，防止 Gemini 闲聊）
-async function requestUpstreamImage(messages, model, taskName) {
-  const release = await queue.acquire();
-  try {
-    return await withRetry(async () => {
-      const upRes = await fetch(`${UPSTREAM_URL}/v1/chat/completions`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${UPSTREAM_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model, messages, stream: false }),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-
-      if (!upRes.ok) throw new Error(`上游 HTTP ${upRes.status}: ${(await upRes.text()).slice(0, 150)}`);
-
-      const data = await upRes.json();
-      const choice = data?.choices?.[0];
-      const imgUrl = await resolveImageResult(choice?.message);
-
-      if (!imgUrl) {
-        const finishReason = choice?.finish_reason || "unknown";
-        const contentStr = JSON.stringify(choice?.message || "");
-        console.warn(`[BFF] 生图未出图: finish_reason=${finishReason}, message="${contentStr.slice(0, 100)}"`);
-        throw new Error(`上游未返回有效图片 (finish_reason: ${finishReason})`);
+  // 1. 优先解析 new-api 返回的 message.images 数组
+  if (Array.isArray(message.images) && message.images.length > 0) {
+    for (const item of message.images) {
+      const candidate = item?.image_url?.url || item?.url || item?.b64_json;
+      if (candidate && typeof candidate === "string") {
+        if (candidate.startsWith("data:image/") || candidate.startsWith("/9j/")) {
+          return await saveBase64Image(candidate);
+        }
+        if (/^https?:\/\//i.test(candidate)) return rewriteImageUrl(candidate);
       }
-      return imgUrl;
-    }, taskName, MAX_RETRIES);
-  } finally {
-    release();
+    }
   }
+
+  // 2. 检查 message.content
+  let content = message.content;
+  if (typeof content === "object" && content !== null) {
+    content = content.content || content.image || content.url || content.b64_json || content.data || JSON.stringify(content);
+  }
+  if (typeof content !== "string" || !content.trim()) return null;
+
+  // 3. Markdown 链接 ![...](url)
+  const mdMatch = content.match(/!\[.*?\]\((https?:\/\/[^\s\)]+)\)/);
+  if (mdMatch) return rewriteImageUrl(mdMatch[1]);
+
+  // 4. Markdown 格式的 Base64 图片
+  const mdB64 = content.match(/!\[.*?\]\((data:image\/[a-zA-Z]+;base64,[^\s\)]+)\)/);
+  if (mdB64) return await saveBase64Image(mdB64[1]);
+
+  // 5. 常见 HTTP(S) URL
+  const urlMatch = content.match(/(https?:\/\/[^\s"'<>]+\.(?:png|jpg|jpeg|webp|gif)(?:\?[^\s"'<>]*)?)/i);
+  if (urlMatch) return rewriteImageUrl(urlMatch[1]);
+  const rawUrl = content.trim().match(/^https?:\/\/[^\s]+$/)?.[0];
+  if (rawUrl) return rewriteImageUrl(rawUrl);
+
+  // 6. 纯 Base64 图片数据
+  const trimmed = content.trim();
+  if (trimmed.startsWith("data:image/") || trimmed.startsWith("/9j/") || (trimmed.length > 200 && /^[A-Za-z0-9+/=\r\n]+$/.test(trimmed.slice(0, 100)))) {
+    return await saveBase64Image(trimmed);
+  }
+
+  return null;
 }
 
-// gpt-image-2 走上游 new-api 标准 OpenAI 生图接口
-async function requestGptImage(prompt, size, taskName) {
+// 策略 A: OpenAI 标准图片接口适配器 (用于 gpt-image-2 等标准生图模型)
+async function dispatchOpenAiImage({ model, prompt, size }) {
+  const upRes = await fetch(`${UPSTREAM_URL}/v1/images/generations`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${UPSTREAM_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ model, prompt, size: size || "1024x1024", n: 1 }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!upRes.ok) throw new Error(`OpenAI HTTP ${upRes.status}: ${(await upRes.text()).slice(0, 150)}`);
+  const data = await upRes.json();
+  const imgUrl = data?.data?.[0]?.url;
+  if (!imgUrl) throw new Error("上游未返回有效图片地址");
+  return rewriteImageUrl(imgUrl);
+}
+
+// 策略 B: Gemini 对话生图转译适配器 (用于 gemini-3.1-flash-image 系列)
+async function dispatchGeminiChatImage({ model, prompt, size, refImages }) {
+  const formattedPrompt = formatImagePrompt(prompt);
+  const fullPrompt = injectAspectRatio(formattedPrompt, size);
+  const userContent = refImages && refImages.length > 0
+    ? [{ type: "text", text: fullPrompt }, ...refImages]
+    : fullPrompt;
+
+  const upRes = await fetch(`${UPSTREAM_URL}/v1/chat/completions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${UPSTREAM_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ model, messages: [{ role: "user", content: userContent }], stream: false }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+
+  if (!upRes.ok) throw new Error(`Gemini HTTP ${upRes.status}: ${(await upRes.text()).slice(0, 150)}`);
+  const data = await upRes.json();
+  const choice = data?.choices?.[0];
+  const imgUrl = await resolveImageResult(choice?.message);
+
+  if (!imgUrl) {
+    const finishReason = choice?.finish_reason || "unknown";
+    const msgStr = JSON.stringify(choice?.message || "");
+    console.warn(`[BFF] 生图未出图: finish_reason=${finishReason}, message="${msgStr.slice(0, 80)}"`);
+    throw new Error(`上游未返回有效图片 (finish_reason: ${finishReason})`);
+  }
+  return imgUrl;
+}
+
+// 统一生图管道调度核心
+async function executeSingleImageTask({ model, prompt, size, refImages, taskName }) {
   const release = await queue.acquire();
   try {
     return await withRetry(async () => {
-      const upRes = await fetch(`${UPSTREAM_URL}/v1/images/generations`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${UPSTREAM_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "gpt-image-2",
-          prompt,
-          size: size || "1024x1024",
-          n: 1,
-        }),
-        signal: AbortSignal.timeout(120000),
-      });
-
-      if (!upRes.ok) throw new Error(`gpt-image-2 HTTP ${upRes.status}: ${(await upRes.text()).slice(0, 150)}`);
-      const data = await upRes.json();
-      const imgUrl = data?.data?.[0]?.url;
-      if (!imgUrl) throw new Error("gpt-image-2 未返回有效图片直链");
-      return rewriteImageUrl(imgUrl);
+      // 策略选择：gpt-image-2 走原生 OpenAI 图片接口，其余走 Gemini 多模态对话转译
+      if (model === "gpt-image-2" || model.startsWith("dall-e")) {
+        return await dispatchOpenAiImage({ model, prompt, size });
+      }
+      return await dispatchGeminiChatImage({ model, prompt, size, refImages });
     }, taskName, MAX_RETRIES);
   } finally {
     release();
   }
 }
 
-// POST /v1/images/generations 文生图
+// ==========================================
+// 5. 业务请求分发与协议适配 (Handlers)
+// ==========================================
+
+// 文生图接口 POST /v1/images/generations
 async function handleGenerate(req, res) {
   let body = {};
   try {
@@ -360,39 +347,27 @@ async function handleGenerate(req, res) {
   }
 
   const model = body.model || DEFAULT_IMAGE_MODEL;
-  const rawPrompt = body.prompt || "";
+  const prompt = body.prompt || "";
+  const size = body.size;
   const count = Math.max(1, Math.min(10, Number(body.n) || 1));
 
-  console.log(`[BFF] 文生图请求: model=${model}, count=${count}, prompt="${rawPrompt.slice(0, 45)}..."`);
+  console.log(`[BFF] 文生图请求: model=${model}, count=${count}, prompt="${prompt.slice(0, 45)}..."`);
 
   try {
     const tasks = [];
-    const isGptImage = model === "gpt-image-2";
-
-    if (isGptImage) {
-      for (let i = 0; i < count; i++) {
-        if (i > 0) await new Promise((r) => setTimeout(r, STAGGER_INTERVAL_MS));
-        tasks.push(requestGptImage(rawPrompt, body.size, `GPT生图任务 #${i + 1}`));
-      }
-    } else {
-      const formattedPrompt = formatImagePrompt(rawPrompt);
-      const prompt = injectAspectRatio(formattedPrompt, body.size);
-      const messages = [{ role: "user", content: prompt }];
-      for (let i = 0; i < count; i++) {
-        if (i > 0) await new Promise((r) => setTimeout(r, STAGGER_INTERVAL_MS));
-        tasks.push(requestUpstreamImage(messages, model, `生图任务 #${i + 1}`));
-      }
+    for (let i = 0; i < count; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, STAGGER_INTERVAL_MS));
+      tasks.push(executeSingleImageTask({ model, prompt, size, taskName: `生图任务 #${i + 1}` }));
     }
-
     const urls = await Promise.all(tasks);
     sendJson(res, 200, { created: Math.floor(Date.now() / 1000), data: urls.map((url) => ({ url })) });
   } catch (err) {
-    console.error("[BFF] 生图最终失败:", err.message);
+    console.error("[BFF] 生图失败:", err.message);
     sendJson(res, 500, { error: { message: err.message || "生图失败" } });
   }
 }
 
-// POST /v1/images/edits 图生图 / 编辑
+// 图生图 / 编辑接口 POST /v1/images/edits
 async function handleEdits(req, res) {
   try {
     const webReq = new Request("http://localhost" + req.url, {
@@ -403,39 +378,34 @@ async function handleEdits(req, res) {
     });
     const formData = await webReq.formData();
     const model = (formData.get("model") || DEFAULT_IMAGE_MODEL).toString();
-    const rawPrompt = (formData.get("prompt") || "").toString();
-    const formattedPrompt = formatImagePrompt(rawPrompt);
-    const prompt = injectAspectRatio(formattedPrompt, (formData.get("size") || "").toString());
+    const prompt = (formData.get("prompt") || "").toString();
+    const size = (formData.get("size") || "").toString();
     const count = Math.max(1, Math.min(10, Number(formData.get("n")) || 1));
 
-    const imageParts = [];
+    const refImages = [];
     for (const [k, v] of formData.entries()) {
       if ((k === "image" || k === "image[]") && typeof v === "object" && typeof v.arrayBuffer === "function") {
         const b64 = `data:${v.type || "image/png"};base64,${Buffer.from(await v.arrayBuffer()).toString("base64")}`;
-        imageParts.push({ type: "image_url", image_url: { url: b64 } });
+        refImages.push({ type: "image_url", image_url: { url: b64 } });
       }
     }
 
-    const messages = [
-      { role: "user", content: [{ type: "text", text: prompt }, ...imageParts] },
-    ];
-
-    console.log(`[BFF] 图生图请求: model=${model}, refImages=${imageParts.length}, prompt="${prompt.slice(0, 45)}..."`);
+    console.log(`[BFF] 图生图请求: model=${model}, refImages=${refImages.length}, prompt="${prompt.slice(0, 45)}..."`);
 
     const tasks = [];
     for (let i = 0; i < count; i++) {
       if (i > 0) await new Promise((r) => setTimeout(r, STAGGER_INTERVAL_MS));
-      tasks.push(requestUpstreamImage(messages, model, `图生图任务 #${i + 1}`));
+      tasks.push(executeSingleImageTask({ model, prompt, size, refImages, taskName: `图生图任务 #${i + 1}` }));
     }
     const urls = await Promise.all(tasks);
     sendJson(res, 200, { created: Math.floor(Date.now() / 1000), data: urls.map((url) => ({ url })) });
   } catch (err) {
-    console.error("[BFF] 图生图最终失败:", err.message);
+    console.error("[BFF] 图生图失败:", err.message);
     sendJson(res, 500, { error: { message: err.message || "图生图失败" } });
   }
 }
 
-// POST /v1/responses 前端画布流式文本与推理适配
+// 文本与推理适配接口 POST /v1/responses
 async function handleResponses(req, res) {
   let body = {};
   try {
@@ -444,7 +414,7 @@ async function handleResponses(req, res) {
     body = JSON.parse(raw);
   } catch {}
 
-  const model = body.model || "gemini-3.8-flash";
+  const model = "gemini-3.8-flash";
   const messages = Array.isArray(body.input)
     ? body.input.map((item) => ({
         role: item.role || "user",
@@ -463,14 +433,12 @@ async function handleResponses(req, res) {
 
     if (!upRes.ok) return sendJson(res, upRes.status, { error: { message: await upRes.text() } });
 
-    // 非流式返回
     if (!isStream) {
       const data = await upRes.json();
       const text = data?.choices?.[0]?.message?.content || "";
       return sendJson(res, 200, { output_text: text, output: [{ type: "message", content: [{ type: "text", text }] }] });
     }
 
-    // 流式返回：将 chat.completion.chunk 转换为 response.output_text.delta
     res.writeHead(200, { ...CORS_HEADERS, "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", Connection: "keep-alive" });
 
     const reader = upRes.body.getReader();
@@ -508,7 +476,7 @@ async function handleResponses(req, res) {
   }
 }
 
-// 透明反向代理（其他 OpenAI 接口转发）
+// 通用反向代理（转发其他兼容接口）
 async function handleProxy(req, res) {
   const headers = {};
   for (const [k, v] of Object.entries(req.headers)) {
@@ -537,7 +505,7 @@ async function handleProxy(req, res) {
 }
 
 // ==========================================
-// 5. HTTP 服务入口与路由分发
+// 6. HTTP 服务路由调度器
 // ==========================================
 const server = http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") {
@@ -567,11 +535,11 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && (pathname === "/v1/images/edits" || pathname === "/images/edits")) {
     return handleEdits(req, res);
   }
-  // 画布文本/推理流式
+  // 画布文本/推理流式与非流式问答
   if (pathname.startsWith("/v1/responses") || pathname.startsWith("/responses")) {
     return handleResponses(req, res);
   }
-  // 其他通用代理转发
+  // 通用代理
   return handleProxy(req, res);
 });
 
