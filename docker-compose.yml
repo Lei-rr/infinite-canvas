@@ -3,16 +3,9 @@ services:
     image: ghcr.io/lei-rr/infinite-canvas:latest
     container_name: infinite-canvas
     ports:
-      - "3011:3000"
+      - "${PORT:-3011}:3000"
     restart: always
     volumes:
       - ./data/images:/app/data/images
-    environment:
-      APP_TITLE: "炸天帮画布"
-      UPSTREAM_URL: "http://your-new-api-host:3000"
-      UPSTREAM_KEY: "sk-your-api-key"
-      MAX_RETRIES: "3"
-      RETRY_DELAY_MS: "1500"
-      MAX_CONCURRENT: "10"
-      STAGGER_INTERVAL_MS: "1200"
-      REQUEST_TIMEOUT_MS: "45000"
+    env_file:
+      - .env

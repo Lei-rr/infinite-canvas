@@ -18,12 +18,11 @@ const STAGGER_INTERVAL_MS = Number(process.env.STAGGER_INTERVAL_MS || 1000);
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 45000);
 const IMAGE_TIMEOUT_MS = Number(process.env.IMAGE_DOWNLOAD_TIMEOUT_MS || 45000);
 
-// 支持的模型列表（供前端读取展示）
+const DEFAULT_IMAGE_MODEL = process.env.IMAGE_MODEL || "gemini-3.1-flash-image";
+
+// 支持的模型列表（纯生图模型）
 const SUPPORTED_MODELS = [
-  { id: "gemini-3.1-flash-image", object: "model" },
-  { id: "gemini-3.1-flash-image-2K", object: "model" },
-  { id: "gemini-3.1-flash-image-4K", object: "model" },
-  { id: "gemini-3.8-flash", object: "model" },
+  { id: DEFAULT_IMAGE_MODEL, object: "model" },
 ];
 
 const CORS_HEADERS = {
@@ -326,7 +325,7 @@ async function handleGenerate(req, res) {
     return sendJson(res, 400, { error: { message: "Invalid JSON body" } });
   }
 
-  const model = body.model || "gemini-3.1-flash-image";
+  const model = body.model || DEFAULT_IMAGE_MODEL;
   const rawPrompt = body.prompt || "";
   const formattedPrompt = formatImagePrompt(rawPrompt);
   const prompt = injectAspectRatio(formattedPrompt, body.size);
@@ -359,7 +358,7 @@ async function handleEdits(req, res) {
       duplex: "half",
     });
     const formData = await webReq.formData();
-    const model = (formData.get("model") || "gemini-3.1-flash-image").toString();
+    const model = (formData.get("model") || DEFAULT_IMAGE_MODEL).toString();
     const rawPrompt = (formData.get("prompt") || "").toString();
     const formattedPrompt = formatImagePrompt(rawPrompt);
     const prompt = injectAspectRatio(formattedPrompt, (formData.get("size") || "").toString());
