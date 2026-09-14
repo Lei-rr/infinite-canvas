@@ -20,8 +20,9 @@ const IMAGE_TIMEOUT_MS = Number(process.env.IMAGE_DOWNLOAD_TIMEOUT_MS || 45000);
 
 const DEFAULT_IMAGE_MODEL = process.env.IMAGE_MODEL || "gemini-3.1-flash-image";
 
-// 支持的模型列表（支持环境变量 MODELS 自定义逗号分隔，默认提供标准、2K、4K）
-const SUPPORTED_MODELS = (process.env.MODELS || "gemini-3.1-flash-image,gemini-3.1-flash-image-2K,gemini-3.1-flash-image-4K")
+// 支持的模型列表（默认提供 Gemini 1K/2K/4K 与 gpt-image-2）
+const DEFAULT_MODELS_STR = "gemini-3.1-flash-image,gemini-3.1-flash-image-2K,gemini-3.1-flash-image-4K,gpt-image-2";
+const SUPPORTED_MODELS = (process.env.MODELS || DEFAULT_MODELS_STR)
   .split(",")
   .map((id) => id.trim())
   .filter(Boolean)
@@ -316,6 +317,37 @@ async function requestUpstreamImage(messages, model, taskName) {
   }
 }
 
+// gpt-image-2 走上游 new-api 标准 OpenAI 生图接口
+async function requestGptImage(prompt, size, taskName) {
+  const release = await queue.acquire();
+  try {
+    return await withRetry(async () => {
+      const upRes = await fetch(`${UPSTREAM_URL}/v1/images/generations`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${UPSTREAM_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-image-2",
+          prompt,
+          size: size || "1024x1024",
+          n: 1,
+        }),
+        signal: AbortSignal.timeout(120000),
+      });
+
+      if (!upRes.ok) throw new Error(`gpt-image-2 HTTP ${upRes.status}: ${(await upRes.text()).slice(0, 150)}`);
+      const data = await upRes.json();
+      const imgUrl = data?.data?.[0]?.url;
+      if (!imgUrl) throw new Error("gpt-image-2 未返回有效图片直链");
+      return rewriteImageUrl(imgUrl);
+    }, taskName, MAX_RETRIES);
+  } finally {
+    release();
+  }
+}
+
 // POST /v1/images/generations 文生图
 async function handleGenerate(req, res) {
   let body = {};
@@ -329,19 +361,29 @@ async function handleGenerate(req, res) {
 
   const model = body.model || DEFAULT_IMAGE_MODEL;
   const rawPrompt = body.prompt || "";
-  const formattedPrompt = formatImagePrompt(rawPrompt);
-  const prompt = injectAspectRatio(formattedPrompt, body.size);
   const count = Math.max(1, Math.min(10, Number(body.n) || 1));
-  const messages = [{ role: "user", content: prompt }];
 
   console.log(`[BFF] 文生图请求: model=${model}, count=${count}, prompt="${rawPrompt.slice(0, 45)}..."`);
 
   try {
     const tasks = [];
-    for (let i = 0; i < count; i++) {
-      if (i > 0) await new Promise((r) => setTimeout(r, STAGGER_INTERVAL_MS));
-      tasks.push(requestUpstreamImage(messages, model, `生图任务 #${i + 1}`));
+    const isGptImage = model === "gpt-image-2";
+
+    if (isGptImage) {
+      for (let i = 0; i < count; i++) {
+        if (i > 0) await new Promise((r) => setTimeout(r, STAGGER_INTERVAL_MS));
+        tasks.push(requestGptImage(rawPrompt, body.size, `GPT生图任务 #${i + 1}`));
+      }
+    } else {
+      const formattedPrompt = formatImagePrompt(rawPrompt);
+      const prompt = injectAspectRatio(formattedPrompt, body.size);
+      const messages = [{ role: "user", content: prompt }];
+      for (let i = 0; i < count; i++) {
+        if (i > 0) await new Promise((r) => setTimeout(r, STAGGER_INTERVAL_MS));
+        tasks.push(requestUpstreamImage(messages, model, `生图任务 #${i + 1}`));
+      }
     }
+
     const urls = await Promise.all(tasks);
     sendJson(res, 200, { created: Math.floor(Date.now() / 1000), data: urls.map((url) => ({ url })) });
   } catch (err) {
