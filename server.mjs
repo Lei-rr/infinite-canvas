@@ -68,6 +68,15 @@ function injectAspectRatio(prompt, size) {
   return matched ? `${prompt.trim()} --ar ${matched[1]}` : prompt;
 }
 
+// 严格绘图指令包装（强制模型必须输出图片，严禁闲聊、解释或回复普通文本）
+function formatImagePrompt(rawPrompt) {
+  const p = (rawPrompt || "").trim();
+  if (/^(draw|generate|create|render)\s+an?\s+image/i.test(p)) {
+    return p;
+  }
+  return `Generate an image depicting: "${p}". Do not chat, explain, or output text. Directly invoke the image generation tool.`;
+}
+
 // 保存 Base64 图片数据到本地持久化目录
 async function saveBase64Image(b64Str) {
   const cleanB64 = b64Str.replace(/^data:image\/[a-zA-Z]+;base64,/, "");
@@ -318,11 +327,13 @@ async function handleGenerate(req, res) {
   }
 
   const model = body.model || "gemini-3.1-flash-image";
-  const prompt = injectAspectRatio(body.prompt || "", body.size);
+  const rawPrompt = body.prompt || "";
+  const formattedPrompt = formatImagePrompt(rawPrompt);
+  const prompt = injectAspectRatio(formattedPrompt, body.size);
   const count = Math.max(1, Math.min(10, Number(body.n) || 1));
   const messages = [{ role: "user", content: prompt }];
 
-  console.log(`[BFF] 文生图请求: model=${model}, count=${count}, prompt="${prompt.slice(0, 45)}..."`);
+  console.log(`[BFF] 文生图请求: model=${model}, count=${count}, prompt="${rawPrompt.slice(0, 45)}..."`);
 
   try {
     const tasks = [];
@@ -349,7 +360,9 @@ async function handleEdits(req, res) {
     });
     const formData = await webReq.formData();
     const model = (formData.get("model") || "gemini-3.1-flash-image").toString();
-    const prompt = injectAspectRatio((formData.get("prompt") || "").toString(), (formData.get("size") || "").toString());
+    const rawPrompt = (formData.get("prompt") || "").toString();
+    const formattedPrompt = formatImagePrompt(rawPrompt);
+    const prompt = injectAspectRatio(formattedPrompt, (formData.get("size") || "").toString());
     const count = Math.max(1, Math.min(10, Number(formData.get("n")) || 1));
 
     const imageParts = [];
