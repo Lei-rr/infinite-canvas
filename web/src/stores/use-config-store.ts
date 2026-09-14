@@ -79,9 +79,6 @@ export const DEFAULT_LOCAL_PROXY_URL = "http://127.0.0.1:23210";
 
 export const DEFAULT_CHANNEL_MODELS: ChannelModel[] = [
     { name: "gemini-3.1-flash-image", capability: "image" },
-    { name: "gemini-3.1-flash-image-2K", capability: "image" },
-    { name: "gemini-3.1-flash-image-4K", capability: "image" },
-    { name: "gemini-3.8-flash", capability: "text" },
 ];
 
 export const defaultConfig: AiConfig = {
@@ -102,7 +99,7 @@ export const defaultConfig: AiConfig = {
     model: "default::gemini-3.1-flash-image",
     imageModel: "default::gemini-3.1-flash-image",
     videoModel: "",
-    textModel: "default::gemini-3.8-flash",
+    textModel: "",
     audioModel: "",
     audioVoice: "alloy",
     audioFormat: "mp3",
@@ -115,7 +112,7 @@ export const defaultConfig: AiConfig = {
     videoMode: "frames",
     systemPrompt: "",
     reasoningEffort: "auto",
-    models: ["default::gemini-3.1-flash-image", "default::gemini-3.1-flash-image-2K", "default::gemini-3.1-flash-image-4K", "default::gemini-3.8-flash"],
+    models: ["default::gemini-3.1-flash-image"],
     quality: "auto",
     size: "1:1",
     background: "",
@@ -184,19 +181,12 @@ export function modelMatchesCapability(config: AiConfig, value: string, capabili
 
 export function resolveModelForCapability(config: AiConfig, currentModel: string | undefined, capability: ModelCapability) {
     const defaultImage = "default::gemini-3.1-flash-image";
-    const defaultText = "default::gemini-3.8-flash";
     if (capability === "image") {
         if (currentModel && config.models.includes(currentModel)) return currentModel;
         if (config.imageModel && config.models.includes(config.imageModel)) return config.imageModel;
         return defaultImage;
     }
-    if (capability === "text") {
-        if (currentModel && config.models.includes(currentModel)) return currentModel;
-        if (config.textModel && config.models.includes(config.textModel)) return config.textModel;
-        return defaultText;
-    }
-    const defaultModel = capability === "video" ? config.videoModel : config.audioModel;
-    return defaultModel || defaultImage;
+    return defaultImage;
 }
 
 export function selectableModelsByCapability(config: AiConfig, capability?: ModelCapability) {
@@ -268,10 +258,11 @@ export const useConfigStore = create<ConfigStore>()(
                         apiFormat: normalizeApiFormat(config.apiFormat),
                         channels,
                         models,
-                        imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
-                        videoModel: normalizeModelOptionValue(config.videoModel, channels),
-                        textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
-                        audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
+                        model: "default::gemini-3.1-flash-image",
+                        imageModel: "default::gemini-3.1-flash-image",
+                        videoModel: "",
+                        textModel: "",
+                        audioModel: "",
                         audioVoice: config.audioVoice || defaultConfig.audioVoice,
                         audioFormat: config.audioFormat || defaultConfig.audioFormat,
                         audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
