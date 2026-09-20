@@ -10,6 +10,7 @@ import "dayjs/locale/zh-cn";
 import { useTranslation } from "react-i18next";
 
 import { ClientRootInit } from "@/components/layout/client-root-init";
+import { runtimeAppTitle } from "@/constant/env";
 import type { AppLocale } from "@/i18n";
 import { getAntThemeConfig } from "@/lib/app-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -38,8 +39,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
     useEffect(() => {
         document.documentElement.lang = locale;
         // [定制] 站点标题优先读取容器启动时注入的运行时配置，未注入时回退到 i18n 标题
-        const runtimeTitle = (window as unknown as { __RUNTIME_CONFIG__?: { APP_TITLE?: string } })?.__RUNTIME_CONFIG__?.APP_TITLE;
-        document.title = runtimeTitle?.trim() || t("meta.title");
+        document.title = runtimeAppTitle() || t("meta.title");
         document.querySelector('meta[name="description"]')?.setAttribute("content", t("meta.description"));
         dayjs.locale(locale === "zh-CN" ? "zh-cn" : "en");
     }, [locale, t]);

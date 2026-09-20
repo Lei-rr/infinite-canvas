@@ -3,6 +3,7 @@ import { Link, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
 import { navigationTools, type NavigationToolSlug } from "@/constant/navigation-tools";
+import { runtimeAppTitle } from "@/constant/env";
 import { AppConfigModal } from "@/components/layout/app-config-modal";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
@@ -47,9 +48,7 @@ export function AppTopNav() {
                                     }}
                                 />
                                 {/* [定制] 顶栏标题优先使用运行时注入的 APP_TITLE */}
-                                <span className="text-base font-medium">
-                                    {(window as unknown as { __RUNTIME_CONFIG__?: { APP_TITLE?: string } })?.__RUNTIME_CONFIG__?.APP_TITLE?.trim() || t("meta.title")}
-                                </span>
+                                <span className="text-base font-medium">{runtimeAppTitle() || t("meta.title")}</span>
                             </Link>
 
                             <button
