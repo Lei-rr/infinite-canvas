@@ -7,3 +7,8 @@ services:
     ports:
       - "3000:3000"
     restart: unless-stopped
+    volumes:
+      - ./data/images:/app/data/images
+      - ./data/auth:/app/data/auth
+    env_file:
+      - .env

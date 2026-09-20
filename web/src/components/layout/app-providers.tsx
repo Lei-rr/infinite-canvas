@@ -37,8 +37,9 @@ export function AppProviders({ children }: { children: ReactNode }) {
 
     useEffect(() => {
         document.documentElement.lang = locale;
-        const appTitle = (window as unknown as { __RUNTIME_CONFIG__?: { APP_TITLE?: string } })?.__RUNTIME_CONFIG__?.APP_TITLE || "炸天帮画布";
-        document.title = appTitle;
+        // [定制] 站点标题优先读取容器启动时注入的运行时配置，未注入时回退到 i18n 标题
+        const runtimeTitle = (window as unknown as { __RUNTIME_CONFIG__?: { APP_TITLE?: string } })?.__RUNTIME_CONFIG__?.APP_TITLE;
+        document.title = runtimeTitle?.trim() || t("meta.title");
         document.querySelector('meta[name="description"]')?.setAttribute("content", t("meta.description"));
         dayjs.locale(locale === "zh-CN" ? "zh-cn" : "en");
     }, [locale, t]);

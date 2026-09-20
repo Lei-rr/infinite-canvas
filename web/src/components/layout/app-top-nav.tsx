@@ -1,5 +1,4 @@
-import { Bot, Menu } from "lucide-react";
-import { Button, Tooltip } from "antd";
+import { Menu } from "lucide-react";
 import { Link, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
@@ -20,8 +19,9 @@ export function AppTopNav() {
     const agentEnabled = useAgentStore((state) => state.enabled);
     const agentConnected = useAgentStore((state) => state.connected);
     const connectAgent = useAgentStore((state) => state.connectAgent);
-    const togglePanel = useAgentStore((state) => state.togglePanel);
-    const panelOpen = useAgentStore((state) => state.panelOpen);
+    // [定制] Agent 面板入口已停用，相关状态不再读取
+    // const togglePanel = useAgentStore((state) => state.togglePanel);
+    // const panelOpen = useAgentStore((state) => state.panelOpen);
     const hideHeader = /^\/canvas\/[^/]+/.test(pathname);
     const slug = pathname.split("/").filter(Boolean)[0];
     const activeToolSlug = navigationTools.some((tool) => tool.slug === slug) ? (slug as NavigationToolSlug) : undefined;
@@ -46,7 +46,10 @@ export function AppTopNav() {
                                         WebkitMask: "url(/logo.svg) center / contain no-repeat",
                                     }}
                                 />
-                                <span className="text-base font-medium">{(window as unknown as { __RUNTIME_CONFIG__?: { APP_TITLE?: string } })?.__RUNTIME_CONFIG__?.APP_TITLE || "炸天帮画布"}</span>
+                                {/* [定制] 顶栏标题优先使用运行时注入的 APP_TITLE */}
+                                <span className="text-base font-medium">
+                                    {(window as unknown as { __RUNTIME_CONFIG__?: { APP_TITLE?: string } })?.__RUNTIME_CONFIG__?.APP_TITLE?.trim() || t("meta.title")}
+                                </span>
                             </Link>
 
                             <button
@@ -83,6 +86,11 @@ export function AppTopNav() {
                         </div>
 
                         <div className="my-auto flex h-9 min-w-0 items-center justify-end gap-2 justify-self-end whitespace-nowrap">
+                            {/* [定制] Agent 面板入口已停用
+                            <Tooltip title={t(panelOpen ? "topNav.closeAgent" : "topNav.openAgent")}>
+                                <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" icon={<Bot className="size-4" />} onClick={togglePanel} aria-label={t(panelOpen ? "topNav.closeAgent" : "topNav.openAgent")} />
+                            </Tooltip>
+                            */}
                             <UserStatusActions />
                         </div>
                     </div>
@@ -90,6 +98,7 @@ export function AppTopNav() {
             ) : null}
 
             <MobileNavDrawer open={mobileNavOpen} activeToolSlug={activeToolSlug} onClose={() => setMobileNavOpen(false)} />
+            <AppConfigModal />
         </>
     );
 }

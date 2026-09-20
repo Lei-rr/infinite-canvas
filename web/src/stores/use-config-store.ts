@@ -77,29 +77,31 @@ const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 export const LOCAL_PROXY_PACKAGE = "@basketikun/canvas-proxy";
 export const DEFAULT_LOCAL_PROXY_URL = "http://127.0.0.1:23210";
 
-export const DEFAULT_CHANNEL_MODELS: ChannelModel[] = [
-    { name: "gemini-3.1-flash-image", capability: "image" },
-    { name: "gemini-3.1-flash-image-2K", capability: "image" },
-    { name: "gemini-3.1-flash-image-4K", capability: "image" },
-];
+// [定制] 内置 BFF 代理地址与固定凭证：Nginx 将 /api-proxy 转发到容器内 BFF，前端无需任何 API 配置。
+export const BUILTIN_CHANNEL_ID = "default";
+export const BUILTIN_BASE_URL = "/api-proxy";
+export const BUILTIN_API_KEY = "system-key";
+export const BUILTIN_CHANNEL_MODELS: ChannelModel[] = [{ name: "gemini-3.1-flash-image", capability: "image" }];
 
 export const defaultConfig: AiConfig = {
     channelMode: "local",
-    baseUrl: "/api-proxy",
-    apiKey: "system-key",
+    // [定制] 默认指向内置渠道，不暴露真实上游
+    baseUrl: BUILTIN_BASE_URL,
+    apiKey: BUILTIN_API_KEY,
     apiFormat: "openai",
     channels: [
         {
-            id: "default",
+            id: BUILTIN_CHANNEL_ID,
+            // [定制] 内置渠道名称固定，不随语言切换
             name: "系统内置渠道",
-            baseUrl: "/api-proxy",
-            apiKey: "system-key",
+            baseUrl: BUILTIN_BASE_URL,
+            apiKey: BUILTIN_API_KEY,
             apiFormat: "openai",
-            models: DEFAULT_CHANNEL_MODELS,
+            models: BUILTIN_CHANNEL_MODELS,
         },
     ],
-    model: "default::gemini-3.1-flash-image",
-    imageModel: "default::gemini-3.1-flash-image",
+    model: `default::${BUILTIN_CHANNEL_MODELS[0].name}`,
+    imageModel: `default::${BUILTIN_CHANNEL_MODELS[0].name}`,
     videoModel: "",
     textModel: "",
     audioModel: "",
@@ -114,16 +116,12 @@ export const defaultConfig: AiConfig = {
     videoMode: "frames",
     systemPrompt: "",
     reasoningEffort: "auto",
-    models: [
-        "default::gemini-3.1-flash-image",
-        "default::gemini-3.1-flash-image-2K",
-        "default::gemini-3.1-flash-image-4K",
-    ],
+    models: [`default::${BUILTIN_CHANNEL_MODELS[0].name}`],
     quality: "auto",
     size: "1:1",
     background: "",
     count: "1",
-    canvasImageCount: "1",
+    canvasImageCount: "3",
     proxyEnabled: false,
     proxyUrl: DEFAULT_LOCAL_PROXY_URL,
 };
@@ -186,13 +184,11 @@ export function modelMatchesCapability(config: AiConfig, value: string, capabili
 }
 
 export function resolveModelForCapability(config: AiConfig, currentModel: string | undefined, capability: ModelCapability) {
-    const defaultImage = "default::gemini-3.1-flash-image";
-    if (capability === "image") {
-        if (currentModel && config.models.includes(currentModel)) return currentModel;
-        if (config.imageModel && config.models.includes(config.imageModel)) return config.imageModel;
-        return defaultImage;
-    }
-    return defaultImage;
+    const defaultModel = capability === "image" ? config.imageModel : capability === "video" ? config.videoModel : capability === "audio" ? config.audioModel : config.textModel;
+    const fallbackModel = capability === "image" ? defaultConfig.imageModel : capability === "video" ? defaultConfig.videoModel : capability === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
+    if (currentModel && modelMatchesCapability(config, currentModel, capability)) return currentModel;
+    if (defaultModel && modelMatchesCapability(config, defaultModel, capability)) return defaultModel;
+    return fallbackModel;
 }
 
 export function selectableModelsByCapability(config: AiConfig, capability?: ModelCapability) {
@@ -205,8 +201,9 @@ export function resolveModelScript(config: AiConfig, value: string) {
     return findChannelModel(config, value)?.model.script?.trim() || "";
 }
 
-function isAiConfigReady(_config?: AiConfig, _model?: string) {
-    return true;
+function isAiConfigReady(config: AiConfig, model: string) {
+    const channel = resolveModelChannel(config, model);
+    return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
 }
 
 export const useConfigStore = create<ConfigStore>()(
@@ -218,7 +215,8 @@ export const useConfigStore = create<ConfigStore>()(
             configTab: "channels",
             shouldPromptContinue: false,
             updateConfig: (key, value) => {
-                if (key === "channels" || key === "baseUrl" || key === "apiKey") return;
+                // [定制] 渠道与凭证由内置 BFF 固定管理，禁止从界面改写
+                if (key === "channels" || key === "baseUrl" || key === "apiKey" || key === "apiFormat") return;
                 set((state) => ({
                     config: {
                         ...state.config,
@@ -227,6 +225,7 @@ export const useConfigStore = create<ConfigStore>()(
                 }));
             },
             importChannelCredentials: () => {
+                // [定制] 停用 URL 导入凭证入口
                 return { status: "missing-base-url" };
             },
             updateWebdavConfig: (key, value) =>
@@ -249,6 +248,7 @@ export const useConfigStore = create<ConfigStore>()(
                 const persistedConfig = (persistedState.config || {}) as Partial<AiConfig>;
                 const persistedWebdav = (persistedState.webdav || {}) as Partial<WebdavSyncConfig>;
                 const config = { ...defaultConfig, ...persistedConfig };
+                // [定制] 渠道与凭证始终以内置配置为准，忽略浏览器本地存储中的旧渠道
                 config.channels = defaultConfig.channels;
                 config.baseUrl = defaultConfig.baseUrl;
                 config.apiKey = defaultConfig.apiKey;
@@ -264,11 +264,12 @@ export const useConfigStore = create<ConfigStore>()(
                         apiFormat: normalizeApiFormat(config.apiFormat),
                         channels,
                         models,
-                        model: "default::gemini-3.1-flash-image",
-                        imageModel: "default::gemini-3.1-flash-image",
-                        videoModel: "",
-                        textModel: "",
-                        audioModel: "",
+                        // [定制] 渠道固定后旧模型值可能失效，回退到内置默认模型
+                        model: normalizeModelOptionValue(config.model, channels) || defaultConfig.model,
+                        imageModel: normalizeModelOptionValue(config.imageModel, channels) || defaultConfig.imageModel,
+                        videoModel: normalizeModelOptionValue(config.videoModel, channels) || "",
+                        textModel: normalizeModelOptionValue(config.textModel, channels) || "",
+                        audioModel: normalizeModelOptionValue(config.audioModel, channels) || "",
                         audioVoice: config.audioVoice || defaultConfig.audioVoice,
                         audioFormat: config.audioFormat || defaultConfig.audioFormat,
                         audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
@@ -279,9 +280,9 @@ export const useConfigStore = create<ConfigStore>()(
                         videoGenerateAudio: config.videoGenerateAudio || "true",
                         videoWatermark: config.videoWatermark || "false",
                         videoMode: config.videoMode === "reference" ? "reference" : "frames",
-                        canvasImageCount: config.canvasImageCount || "1",
-                        proxyEnabled: false,
-                        proxyUrl: DEFAULT_LOCAL_PROXY_URL,
+                        canvasImageCount: config.canvasImageCount || "3",
+                        proxyEnabled: Boolean(config.proxyEnabled),
+                        proxyUrl: config.proxyUrl || DEFAULT_LOCAL_PROXY_URL,
                     },
                 };
             },

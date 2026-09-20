@@ -27,6 +27,8 @@ export const router = createBrowserRouter([
             { path: "/prompts", element: <PromptsPage /> },
             { path: "/canvas", element: <CanvasPage /> },
             { path: "/canvas/:id", element: <CanvasProjectPage /> },
+            // [定制] API 设置页已停用，访问时重定向到画布
+            // { path: "/config", element: <ConfigPage /> },
             { path: "/config", element: <Navigate to="/canvas" replace /> },
         ],
     },

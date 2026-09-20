@@ -11,10 +11,14 @@ sanitize_id() {
     printf '%s' "$1" | tr -cd 'A-Za-z0-9-'
 }
 
+# [定制] 站点标题同样允许通过环境变量注入，去掉可能破坏 JS 字符串的引号与换行。
+sanitize_text() {
+    printf '%s' "$1" | tr -d '"\\\n\r'
+}
+
 GA4_ID=$(sanitize_id "${ANALYTICS_GA4_ID:-}")
 BAIDU_ID=$(sanitize_id "${ANALYTICS_BAIDU_ID:-}")
-
-APP_TITLE="${APP_TITLE:-炸天帮画布}"
+APP_TITLE=$(sanitize_text "${APP_TITLE:-}")
 
 cat > /usr/share/nginx/html/config.js <<EOF
 window.__RUNTIME_CONFIG__ = {
@@ -24,6 +28,6 @@ window.__RUNTIME_CONFIG__ = {
 };
 EOF
 
-# 启动内置转换代理后端
+# [定制] 启动内置 BFF：渠道聚合、模型同步、图片持久化与统一出图格式
 echo "[Entrypoint] Starting internal BFF server..."
-node /app/server.mjs &
+node /app/server/index.mjs &
