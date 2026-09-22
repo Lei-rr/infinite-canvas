@@ -29,7 +29,7 @@ export const config = {
     id: "upstream",
     baseUrl: text(process.env.UPSTREAM_URL, "http://localhost:3000").replace(/\/+$/, ""),
     apiKey: text(process.env.UPSTREAM_KEY),
-    fallbackModels: text(process.env.MODELS, "gemini-3.1-flash-image,gemini-3.1-flash-image-2K,gemini-3.1-flash-image-4K,gpt-image-2")
+    fallbackModels: text(process.env.MODELS, "gemini-3.1-flash-image,gemini-3.1-flash-image-2K,gemini-3.1-flash-image-4K")
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean),
@@ -42,7 +42,7 @@ export const config = {
     refreshToken: text(process.env.L0VEYOU_REFRESH_TOKEN),
     pollIntervalMs: num(process.env.L0VEYOU_POLL_INTERVAL_MS, 3000),
     taskTimeoutMs: num(process.env.L0VEYOU_TASK_TIMEOUT_MS, 300_000),
-    models: text(process.env.L0VEYOU_MODELS, "gpt-image-2,gpt-image-2-5-flare,gpt-image-2-5-full")
+    models: text(process.env.L0VEYOU_MODELS, "gpt-image-2,gpt-image-2-5,gpt-image-2-5-flare,gpt-image-2-5-full")
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean),

@@ -1,6 +1,6 @@
 import { config } from "../config.mjs";
 import { badGateway } from "../lib/errors.mjs";
-import { extractImageUrl, normalizeImageResult } from "../lib/image-result.mjs";
+import { extractImageUrl } from "../lib/image-result.mjs";
 import { createLogger } from "../lib/logger.mjs";
 
 const log = createLogger("channel:upstream");
@@ -10,7 +10,7 @@ export const label = config.upstream.label;
 
 const VIDEO_KEYWORDS = ["video", "sora", "veo", "kling", "wan", "hailuo"];
 const AUDIO_KEYWORDS = ["audio", "tts", "speech", "voice", "music", "sound"];
-const IMAGE_KEYWORDS = ["seedream", "gpt-image", "image", "dall-e", "dalle", "imagen", "flux", "sdxl", "stable-diffusion", "midjourney"];
+const IMAGE_KEYWORDS = ["seedream", "image", "imagen", "flux", "sdxl", "stable-diffusion", "midjourney"];
 
 // 与前端 guessCapability 保持一致的模型能力推测，供模型选择器分组
 function guessCapability(model) {
@@ -47,29 +47,7 @@ export function fallbackModels() {
   return config.upstream.fallbackModels.map((model) => ({ id: model, capability: guessCapability(model) }));
 }
 
-// gpt-image / dall-e 走原生图片接口，其余多模态模型走对话接口提取图片
 export async function generateImage({ model, prompt, size, refImages = [] }) {
-  if (model === "gpt-image-2" || model.startsWith("dall-e")) {
-    return generateViaImageApi({ model, prompt, size });
-  }
-  return generateViaChat({ model, prompt, size, refImages });
-}
-
-async function generateViaImageApi({ model, prompt, size }) {
-  const response = await fetch(endpoint("/v1/images/generations"), {
-    method: "POST",
-    headers: headers({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ model, prompt, size: size || "1024x1024", n: 1 }),
-    signal: AbortSignal.timeout(config.requestTimeoutMs),
-  });
-  if (!response.ok) throw badGateway(`上游生图失败: HTTP ${response.status} ${(await response.text()).slice(0, 200)}`);
-  const payload = await response.json();
-  const url = await normalizeImageResult(payload?.data?.[0]);
-  if (!url) throw badGateway("上游未返回有效图片地址");
-  return url;
-}
-
-async function generateViaChat({ model, prompt, size, refImages }) {
   const instruction = `Generate an image depicting: "${prompt}". Do not chat, explain, or output text. Directly invoke the image generation tool.`;
   const content = refImages.length ? [{ type: "text", text: instruction }, ...refImages] : instruction;
 
